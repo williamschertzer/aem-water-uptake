@@ -1,0 +1,36 @@
+"""Shared pytest fixtures and capability markers.
+
+The ``src`` layout is prepended to ``sys.path`` so the suite runs against a bare
+checkout without requiring ``pip install -e .`` first.
+"""
+
+import shutil
+import sys
+from pathlib import Path
+
+import pytest
+
+SRC = Path(__file__).resolve().parents[1] / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
+
+BTMA_PS = "[*]CC([*])c1ccc(C[N+](C)(C)C)cc1"
+
+
+@pytest.fixture(scope="session")
+def btma_ps_smiles():
+    return BTMA_PS
+
+
+def _have(*binaries):
+    return all(shutil.which(b) for b in binaries)
+
+
+needs_ambertools = pytest.mark.skipif(
+    not _have("antechamber", "parmchk2", "tleap"),
+    reason="AmberTools binaries not on PATH",
+)
+needs_lammps = pytest.mark.skipif(
+    not (shutil.which("lmp") or shutil.which("lmp_serial")),
+    reason="LAMMPS binary not on PATH",
+)

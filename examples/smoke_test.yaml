@@ -1,0 +1,45 @@
+# Deliberately tiny system used for the end-to-end validation run and CI smoke
+# tests. Physically under-converged -- it exists to prove the pipeline executes.
+polymer:
+  name: BTMA-PS-smoke
+  smiles: "[*]CC([*])c1ccc(C[N+](C)(C)C)cc1"
+  n_chains: 2
+  chain_length: 5
+  counterion: "Cl-"
+  terminal_group: "CH3"
+
+box:
+  initial_density: 0.25
+  target_density: 1.05
+  seed: 424242
+
+md:
+  temperature: 300.0
+  timestep: 1.0
+  cutoff: 9.0
+  soft_push_steps: 2000
+  anneal_steps: 4000
+  anneal_temperature: 500.0
+  compression_steps: 2000
+  dry_npt_steps: 10000
+  relax_npt_steps: 4000
+  thermo_every: 200
+  mpi_ranks: 1
+
+insertion:
+  batch_size: 8
+  min_batch_size: 2
+  grid_spacing: 0.6
+  max_failed_batches: 2
+  max_iterations: 12
+
+widom:
+  enabled: true
+  n_blocks: 3
+  insertions_per_call: 200
+  steps_per_block: 2000
+  bulk_box_length: 22.0
+  bulk_equil_steps: 10000
+
+water_model: spce
+workdir: runs/smoke

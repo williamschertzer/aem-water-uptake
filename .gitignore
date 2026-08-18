@@ -1,0 +1,18 @@
+__pycache__/
+.DS_Store
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.coverage
+htmlcov/
+/~/
+
+# run outputs
+*.lammpstrj
+*.restart
+log.lammps
+validation_run/
+aem_run/
+_view_*

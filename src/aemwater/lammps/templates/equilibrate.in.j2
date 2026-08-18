@@ -1,0 +1,77 @@
+{% include "common.in.j2" %}
+
+{% if constraints.shake_command -%}
+# Rigid water. SPC/E and TIP3P are *defined* as rigid models -- their parameters
+# were fitted with fixed geometry, so integrating the O-H stretch would give a
+# different liquid and would also force a timestep below 1 fs. Polymer X-H
+# stretches are constrained too, so a {{ md.timestep }} fs timestep is stable.
+# Both share ONE command: LAMMPS allows a single fix shake instance per run.
+{{ constraints.shake_command }}
+{% endif %}
+
+timestep        {{ md.timestep }}
+velocity        all create {{ md.temperature }} {{ seed }} mom yes rot yes dist gaussian
+
+# ---------------------------------------------------------------- stage 3 ----
+# NVT at the packing volume: let the melt lose the memory of the packing
+# algorithm before the barostat starts changing the box.
+fix             nvt_relax all nvt temp {{ md.temperature }} {{ md.temperature }} {{ md.tdamp }}
+{% if md.dump_every > 0 -%}
+dump            traj all custom {{ md.dump_every }} {{ dump_file }} id mol type q x y z
+dump_modify     traj sort id
+{%- endif %}
+run             {{ stages.nvt_relax_steps }}
+unfix           nvt_relax
+
+# ---------------------------------------------------------------- stage 4 ----
+# High-temperature anneal. The packed conformations are not melt conformations;
+# heating above Tg lets chains interpenetrate, which is what sets the void
+# structure that water will later occupy.
+fix             nvt_anneal all nvt temp {{ md.temperature }} {{ stages.anneal_temperature }} {{ md.tdamp }}
+run             {{ stages.heat_steps }}
+unfix           nvt_anneal
+fix             nvt_hold all nvt temp {{ stages.anneal_temperature }} {{ stages.anneal_temperature }} {{ md.tdamp }}
+run             {{ stages.anneal_steps }}
+unfix           nvt_hold
+
+# ---------------------------------------------------------------- stage 5 ----
+# NPT compression to the operating state, at elevated pressure.
+#
+# This has to be done under load. Collapsing a 0.35 g/cm3 packing to melt
+# density at 1 atm is barostat-limited: the driving force is the ambient
+# pressure itself, and the cell creeps. Measured on the validation system, 30k
+# steps of iso 1.0 reached 0.70 g/cm3 and stopped climbing -- 35% below a real
+# dry AEM, which would have been reported as a converged dry membrane and
+# inflated every uptake number downstream, since the water goes into the voids
+# that should not be there.
+#
+# The fix is the standard melt-densification cycle: compress hot and hard, then
+# release to the operating pressure and let the density relax back up to its
+# equilibrium value from the dense side rather than creeping toward it from the
+# dilute side.
+fix             npt_squeeze all npt temp {{ stages.anneal_temperature }} {{ stages.anneal_temperature }} {{ md.tdamp }} iso {{ md.compression_pressure }} {{ md.compression_pressure }} {{ md.pdamp }}
+run             {{ stages.squeeze_steps }}
+unfix           npt_squeeze
+
+# Cool to the operating temperature while still under load, so the chains lose
+# mobility at the compressed volume rather than at the dilute one.
+fix             npt_cool all npt temp {{ stages.anneal_temperature }} {{ md.temperature }} {{ md.tdamp }} iso {{ md.compression_pressure }} {{ md.pressure }} {{ md.pdamp }}
+run             {{ stages.cool_steps }}
+unfix           npt_cool
+
+fix             npt_eq all npt temp {{ md.temperature }} {{ md.temperature }} {{ md.tdamp }} iso {{ md.pressure }} {{ md.pressure }} {{ md.pdamp }}
+run             {{ stages.npt_equil_steps }}
+
+# Averages over the production window only, so the compression transient does
+# not contaminate the reported density.
+variable        dens equal density
+variable        vol_ equal vol
+fix             avg_dens all ave/time {{ md.thermo_every }} {{ n_averages }} {{ md.thermo_every * n_averages }} v_dens v_vol_ file {{ density_file }}
+run             {{ stages.npt_prod_steps }}
+
+# Written WITH coefficients: each stage reads the previous stage's data file, so
+# the file has to be self-contained. `nocoeff` would force every downstream stage
+# to re-derive the force field, and any drift between the two paths would be
+# silent.
+write_data      {{ out_data }}
+write_restart   {{ out_restart }}
