@@ -10,7 +10,7 @@ polymer:
   terminal_group: "CH3"
 
 box:
-  initial_density: 0.20
+  initial_density: 0.15
   target_density: 1.10
   min_separation: 2.2
   seed: 20260817
