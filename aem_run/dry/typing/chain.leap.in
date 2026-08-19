@@ -1,0 +1,5 @@
+source leaprc.gaff2
+loadamberparams /data/wschertzer/aem-water-uptake/aem_run/dry/typing/fragment/unit.frcmod
+m0 = loadmol2 /data/wschertzer/aem-water-uptake/aem_run/dry/typing/chain.mol2
+saveamberparm m0 chain.prmtop chain.inpcrd
+quit

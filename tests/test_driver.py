@@ -19,6 +19,7 @@ from aemwater.driver import (
     bulk_n_waters,
     hydration_number,
     next_batch_size,
+    update_failed_batches,
     settle_steps,
     water_uptake_percent,
 )
@@ -57,6 +58,25 @@ def test_gap_measured_in_sigma_not_absolute_units():
 
 def test_zero_stderr_does_not_divide_by_zero():
     assert next_batch_size(100, 8, mu_gap=-1.0, stderr=0.0) > 0
+
+
+def test_uptake_uses_the_config_aware_composition_builder():
+    """Preparation and uptake must agree on polyatomic counterion inventory."""
+    import inspect
+
+    from aemwater import driver
+
+    source = inspect.getsource(driver.run_uptake)
+    assert "composition_from_config(config)" in source
+    assert "build_composition(" not in source
+
+
+def test_consecutive_geometric_shortfalls_accumulate_and_full_batch_resets():
+    failures = update_failed_batches(0, requested=20, inserted=12)
+    assert failures == 1
+    failures = update_failed_batches(failures, requested=10, inserted=0)
+    assert failures == 2
+    assert update_failed_batches(failures, requested=3, inserted=3) == 0
 
 
 # ----------------------------------------------------------- uptake measures --

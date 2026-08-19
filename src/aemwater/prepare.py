@@ -41,7 +41,7 @@ class DryMembrane:
 def prepare_dry_membrane(config, workdir: Path | str) -> DryMembrane:
     """SMILES -> typed chains -> packed cell -> annealed dry membrane."""
     from .assembly import CellContents, assemble, ion_molecules
-    from .chemistry import build_composition
+    from .chemistry import composition_from_config
     from .forcefield.gaff2 import GAFF2Backend
     from .lammps.inputs import (
         ConstraintSpec,
@@ -64,9 +64,7 @@ def prepare_dry_membrane(config, workdir: Path | str) -> DryMembrane:
     workdir = Path(workdir) / "dry"
     workdir.mkdir(parents=True, exist_ok=True)
 
-    comp = build_composition(
-        config.polymer.smiles, config.polymer.n_chains, config.polymer.chain_length
-    )
+    comp = composition_from_config(config)
     LOG.info(
         "composition: %d chains x %d units, %d ionic groups, M_dry = %.1f g/mol",
         config.polymer.n_chains, config.polymer.chain_length,

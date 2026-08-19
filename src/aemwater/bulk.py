@@ -31,6 +31,11 @@ from .widom import WidomEstimate, read_widom_file
 LITERATURE_MU_EX = {"spce": -6.5, "tip3p": -6.1, "tip4p": -6.3}
 LITERATURE_DENSITY = {"spce": 0.998, "tip3p": 0.982, "tip4p": 1.001}
 
+# Increment when the sampling/estimation protocol changes.  Results produced
+# before burst-level output was preserved are not statistically compatible with
+# the corrected blocking estimator and must not be reused from the cache.
+WIDOM_ESTIMATOR_VERSION = 2
+
 
 @dataclass(frozen=True)
 class BulkSettings:
@@ -48,7 +53,11 @@ class BulkSettings:
     seed: int
 
     def key(self) -> str:
-        blob = json.dumps(asdict(self), sort_keys=True).encode()
+        payload = {
+            "settings": asdict(self),
+            "widom_estimator_version": WIDOM_ESTIMATOR_VERSION,
+        }
+        blob = json.dumps(payload, sort_keys=True).encode()
         return hashlib.sha256(blob).hexdigest()[:16]
 
 

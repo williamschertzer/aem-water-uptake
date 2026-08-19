@@ -4,14 +4,14 @@ polymer:
   name: BTMA-PS
   # Repeat unit with explicit backbone attachment points.
   smiles: "[*]CC([*])c1ccc(C[N+](C)(C)C)cc1"
-  n_chains: 8
-  chain_length: 20
-  counterion: "Cl-"
+  n_chains: 5
+  chain_length: 10
+  counterion: "OH-"
   terminal_group: "CH3"
 
 box:
-  initial_density: 0.15
-  target_density: 1.10
+  initial_density: 0.2
+  target_density: 1.0
   min_separation: 2.2
   seed: 20260817
 
@@ -27,10 +27,15 @@ md:
   dry_npt_steps: 200000
   relax_npt_steps: 50000
   dump_every: 1000
+<<<<<<< Updated upstream
   mpi_ranks: 4
+=======
+  mpi_ranks: 1
+>>>>>>> Stashed changes
 
 insertion:
-  batch_size: 20
+  batch_fraction: 0.50
+  batch_size: 50
   min_batch_size: 2
   grid_spacing: 0.5
   probe_radius: 1.4

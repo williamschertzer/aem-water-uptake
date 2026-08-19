@@ -191,6 +191,42 @@ def test_every_template_is_reachable_as_package_data():
     )
 
 
+def test_widom_templates_preserve_each_insertion_burst():
+    """Do not collapse a block before the Python blocking estimator sees it."""
+    for name in ("insert.in.j2", "bulk.in.j2", "widom.in.j2"):
+        text = (TEMPLATE_DIR / name).read_text()
+        assert "{{ widom.every }} 1 {{ widom.every }}" in text
+
+
+def test_insert_enables_shake_only_after_nve_limit_is_removed(tmp_path):
+    """nve/limit and SHAKE must never coexist; LAMMPS can segfault at teardown."""
+    from aemwater.config import PolymerSpec, RunConfig
+    from aemwater.lammps.inputs import ConstraintSpec, GroupSpec, render_input
+
+    config = RunConfig(polymer=PolymerSpec(smiles="[*]CC[*]"))
+    md = config.md
+    context = dict(
+        md=md, widom=config.widom, title="t", data_file="a.data",
+        out_data="b.data", out_restart="b.rst", dump_file="t.lammpstrj",
+        density_file="density.dat", mu_file="mu.dat", water_template="h2o.mol",
+        pair_coeff_lines=["pair_coeff 1 1 0.1 3.0"], extra_types=None,
+        comm_cutoff=12.0, seed=1, velocity_create=True, settle_steps=10,
+        soft=type("Soft", (), {"max_displacement": 0.05})(),
+        minim=type("Min", (), {"etol": 1e-6, "ftol": 1e-6,
+                                "max_iter": 10, "max_eval": 20})(),
+        constraints=ConstraintSpec(True, False, 1, 1),
+        groups=GroupSpec(n_polymer_molecules=1, n_ion_molecules=1,
+                         water_type_o=1, water_type_h=2),
+        n_averages=1, n_widom_samples=1, widom_window=100,
+        npt_equil_steps=10, npt_prod_steps=10, widom_steps=10,
+    )
+    out = tmp_path / "in.insert"
+    render_input("insert.in.j2", out, **context)
+    text = out.read_text()
+    assert text.index("unfix           nve_settle") < text.index("minimize")
+    assert text.index("minimize") < text.index("fix             shake_all")
+
+
 def test_equilibration_densifies_under_load_before_releasing(tmp_path):
     """The squeeze must run at compression_pressure, and release before output.
 

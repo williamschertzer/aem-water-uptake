@@ -93,6 +93,25 @@ def test_bulk_runs_without_a_polymer():
     assert config.md.temperature == pytest.approx(298.15)
 
 
+def test_expert_bulk_reference_is_trusted_and_matches_run_settings(tmp_path):
+    from aemwater.config import PolymerSpec, RunConfig
+
+    config = RunConfig(polymer=PolymerSpec(smiles="[*]CC[*]"))
+    ref = cli._expert_bulk_reference(config, tmp_path, -6.2, 0.1)
+    assert ref.mu_ex.mu_ex == pytest.approx(-6.2)
+    assert ref.mu_ex.stderr == pytest.approx(0.1)
+    assert ref.mu_ex.converged
+    assert ref.settings.water_model == config.water_model
+    assert ref.settings.temperature == config.md.temperature
+
+
+def test_run_help_lists_expert_bulk_override(capsys):
+    with pytest.raises(SystemExit):
+        cli.main(["run", "--help"])
+    out = capsys.readouterr().out
+    assert "--bulk-mu-ex" in out and "--bulk-stderr" in out
+
+
 # ------------------------------------------------------- attribute auditing --
 #: Local variable names whose type is unambiguous across the package, mapped to
 #: the class they hold. Attribute access on these is checked statically.

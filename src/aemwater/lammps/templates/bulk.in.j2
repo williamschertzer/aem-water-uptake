@@ -40,7 +40,9 @@ fix             w all widom {{ widom.every }} {{ widom.insertions_per_call }} 0 
 variable        muex equal f_w[1]
 variable        boltz equal f_w[2]
 variable        wvol equal f_w[3]
-fix             muavg all ave/time {{ widom.every }} {{ n_widom_samples }} {{ widom_window }} v_muex v_boltz v_wvol file {{ mu_file }}
+# Write every insertion-burst observation.  Blocking and uncertainty estimation
+# are performed from this time series in aemwater.widom.
+fix             muavg all ave/time {{ widom.every }} 1 {{ widom.every }} v_muex v_boltz v_wvol file {{ mu_file }}
 run             {{ widom_steps }}
 
 write_data      {{ out_data }}

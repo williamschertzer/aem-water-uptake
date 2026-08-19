@@ -131,6 +131,15 @@ def test_unconverged_inputs_make_the_test_untrustworthy():
     bad = WidomEstimate(-6.0, 0.1, T, 5, np.full(5, -6.0), 1.0, effective_samples=2.0)
     t = SaturationTest(bad, _estimate(-6.0, 0.1))
     assert not t.trustworthy
+    assert not t.saturated, "an unconverged crossing must not stop water loading"
+
+
+def test_burst_series_can_reach_effective_sample_threshold():
+    """Raw burst output, unlike five pre-averaged rows, can pass convergence."""
+    est = estimate_from_series(np.ones(500), T, n_blocks=5)
+    assert est.n_blocks == 5
+    assert est.effective_samples == pytest.approx(500.0)
+    assert est.converged
 
 
 def test_read_widom_file_recomputes_from_boltzmann_factors(tmp_path):

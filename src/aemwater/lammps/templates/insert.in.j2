@@ -1,10 +1,5 @@
 {% include "common.in.j2" %}
 
-{# LAMMPS permits one fix shake per run; ConstraintSpec merges water and X-H. #}
-{% if constraints.shake_command -%}
-{{ constraints.shake_command }}
-{% endif %}
-
 timestep        {{ md.timestep }}
 {% if md.dump_every > 0 -%}
 dump            traj all custom {{ md.dump_every }} {{ dump_file }} id mol type q x y z
@@ -26,6 +21,14 @@ unfix           temp_settle
 
 min_style       cg
 minimize        {{ minim.etol }} {{ minim.ftol }} {{ minim.max_iter }} {{ minim.max_eval }}
+
+{# nve/limit caps atoms independently and is incompatible with SHAKE/RATTLE.
+   Keep SHAKE disabled during both the limited settle and minimization: current
+   LAMMPS releases can enter FixShake::min_post_force and crash for this mixed
+   constrained topology.  Activate constraints only for ordinary MD. #}
+{% if constraints.shake_command -%}
+{{ constraints.shake_command }}
+{% endif %}
 
 # ---------------------------------------------------------------- NPT ---------
 # Swelling is the point: the box must be free to expand as water goes in, so the
@@ -51,7 +54,10 @@ fix             w all widom {{ widom.every }} {{ widom.insertions_per_call }} 0 
 variable        muex equal f_w[1]
 variable        boltz equal f_w[2]
 variable        wvol equal f_w[3]
-fix             muavg all ave/time {{ widom.every }} {{ n_widom_samples }} {{ widom_window }} v_muex v_boltz v_wvol file {{ mu_file }}
+# Preserve one observation per Widom burst.  Python groups this raw time series
+# into contiguous blocks; averaging a whole block here leaves only n_blocks
+# values and makes the effective-sample-size diagnostic impossible.
+fix             muavg all ave/time {{ widom.every }} 1 {{ widom.every }} v_muex v_boltz v_wvol file {{ mu_file }}
 run             {{ widom_steps }}
 unfix           w
 unfix           muavg

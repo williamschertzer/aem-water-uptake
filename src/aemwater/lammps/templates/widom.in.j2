@@ -29,7 +29,9 @@ variable        wvol   equal f_widom[3]
 
 fix             npt_widom all npt temp {{ md.temperature }} {{ md.temperature }} {{ md.tdamp }} iso {{ md.pressure }} {{ md.pressure }} {{ md.pdamp }}
 thermo_style    custom step temp press vol density pe v_mu_ex v_boltz
-fix             avg_mu all ave/time {{ widom.every }} {{ n_averages }} {{ widom.every * n_averages }} v_mu_ex v_boltz v_wvol file {{ mu_file }}
+# Keep one value per insertion burst.  The reader forms contiguous statistical
+# blocks from these observations rather than receiving already-blocked data.
+fix             avg_mu all ave/time {{ widom.every }} 1 {{ widom.every }} v_mu_ex v_boltz v_wvol file {{ mu_file }}
 run             {{ widom.steps_per_block }}
 
 # Written WITH coefficients: each stage reads the previous stage's data file, so

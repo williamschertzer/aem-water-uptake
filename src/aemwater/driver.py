@@ -203,6 +203,11 @@ def next_batch_size(
     return int(max(min_batch, min(max_batch, round(base * scale))))
 
 
+def update_failed_batches(previous: int, requested: int, inserted: int) -> int:
+    """Count consecutive geometric shortfalls, resetting after a full batch."""
+    return previous + 1 if inserted < requested else 0
+
+
 def hydration_number(n_waters: int, n_ionic_groups: int) -> float:
     """lambda: waters per ionic group, the standard AEM hydration measure."""
     if n_ionic_groups <= 0:
@@ -506,7 +511,7 @@ def run_uptake(
 
     from .assembly import CellContents, assemble, ion_molecules, water_molecules
     from .bulk import BulkSettings, run_bulk_reference
-    from .chemistry import build_composition
+    from .chemistry import composition_from_config
     from .insertion import insert_waters
     from .lammps.inputs import (
         ConstraintSpec,
@@ -523,9 +528,7 @@ def run_uptake(
     workdir.mkdir(parents=True, exist_ok=True)
     state_file = workdir / "uptake_state.json"
 
-    comp = build_composition(
-        config.polymer.smiles, config.polymer.n_chains, config.polymer.chain_length
-    )
+    comp = composition_from_config(config)
     n_ionic = comp.total_ionic_groups
     dry_mass = comp.dry_molar_mass
 
@@ -571,6 +574,8 @@ def run_uptake(
     stderr = 0.0
     stop_reason = "max_iterations"
     converged = False
+    failed_batches = 0
+    start_step = 0
 
     if resume and state_file.exists():
         saved = json.loads(state_file.read_text())
@@ -578,6 +583,7 @@ def run_uptake(
         n_waters = saved.get("n_waters", 0)
         mu_gap = saved.get("mu_gap")
         stderr = saved.get("stderr", 0.0)
+<<<<<<< Updated upstream
         if iterations and n_waters != iterations[-1].n_waters_after:
             raise DriverError(
                 f"uptake checkpoint records {n_waters} waters globally but "
@@ -589,9 +595,16 @@ def run_uptake(
         LOG.info(
             "resuming at iteration %d with %d waters from %s",
             len(iterations), n_waters, resume_data,
+=======
+        failed_batches = saved.get("failed_batches", 0)
+        start_step = saved.get("next_step", len(iterations))
+        LOG.info(
+            "resuming at iteration %d with %d waters (%d consecutive geometric shortfalls)",
+            start_step, n_waters, failed_batches,
+>>>>>>> Stashed changes
         )
 
-    for step in range(len(iterations), config.insertion.max_iterations):
+    for step in range(start_step, config.insertion.max_iterations):
         t0 = time.time()
         n_add = next_batch_size(
             n_waters, n_ionic, mu_gap, stderr,
@@ -609,10 +622,30 @@ def run_uptake(
             water_water_min=config.insertion.water_water_min,
             seed=config.insertion.seed + step,
         )
+        failed_batches = update_failed_batches(
+            failed_batches, result.n_requested, result.n_inserted
+        )
+
         if result.n_inserted == 0:
-            stop_reason = "geometric_saturation"
-            LOG.info("iteration %d: no cavity accepts another water", step)
-            break
+            _write_state(state_file, {
+                "iterations": [i.to_row() for i in iterations],
+                "n_waters": n_waters, "mu_gap": mu_gap, "stderr": stderr,
+                "failed_batches": failed_batches, "next_step": step + 1,
+            })
+            if failed_batches >= config.insertion.max_failed_batches:
+                stop_reason = "geometric_saturation"
+                LOG.info(
+                    "iteration %d: no cavity accepts another water; stopping after "
+                    "%d consecutive geometric shortfalls",
+                    step, failed_batches,
+                )
+                break
+            LOG.warning(
+                "iteration %d: no cavity accepts another water "
+                "(%d/%d consecutive geometric shortfalls); retrying",
+                step, failed_batches, config.insertion.max_failed_batches,
+            )
+            continue
 
         n_waters += result.n_inserted
         state = _run_iteration(
@@ -644,6 +677,7 @@ def run_uptake(
         _write_state(state_file, {
             "iterations": [i.to_row() for i in iterations],
             "n_waters": n_waters, "mu_gap": mu_gap, "stderr": stderr,
+            "failed_batches": failed_batches, "next_step": step + 1,
         })
         LOG.info(
             "iteration %d: +%d -> %d waters, lambda = %.2f, uptake = %.1f%%, "
@@ -655,6 +689,15 @@ def run_uptake(
         if state["saturated"]:
             stop_reason = "thermodynamic_saturation"
             converged = True
+            break
+        if failed_batches >= config.insertion.max_failed_batches:
+            stop_reason = "geometric_saturation"
+            converged = True
+            LOG.info(
+                "iteration %d: stopping after %d consecutive geometric "
+                "shortfalls (inserted %d/%d in the latest batch)",
+                step, failed_batches, result.n_inserted, result.n_requested,
+            )
             break
     else:
         LOG.warning(

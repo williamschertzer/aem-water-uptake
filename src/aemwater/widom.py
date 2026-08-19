@@ -64,7 +64,7 @@ class WidomEstimate:
     n_blocks: int
     block_values: np.ndarray
     mean_boltzmann: float
-    effective_samples: float
+    effective_samples: float     # effective insertion-burst observations
     volume: float = 0.0
 
     @property
@@ -244,8 +244,12 @@ class SaturationTest:
         """Saturated once the membrane is no longer more favourable than bulk.
 
         The threshold is the combined statistical uncertainty, so a run stops on a
-        difference it can actually resolve rather than on noise.
+        difference it can actually resolve rather than on noise.  An apparent
+        crossing from unconverged estimates is not evidence of saturation and
+        must never stop the loading loop.
         """
+        if not self.trustworthy:
+            return False
         threshold = self.tolerance_sigma * self.combined_stderr
         return self.difference >= -threshold
 

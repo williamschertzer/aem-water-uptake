@@ -126,6 +126,21 @@ def cmd_run(args) -> int:
 
     config = _load_config(args)
     workdir = args.workdir
+    bulk_mu = getattr(args, "bulk_mu_ex", None)
+    bulk_err = getattr(args, "bulk_stderr", None)
+    if (bulk_mu is None) != (bulk_err is None):
+        raise SystemExit("--bulk-mu-ex and --bulk-stderr must be supplied together")
+    if bulk_err is not None and bulk_err < 0:
+        raise SystemExit("--bulk-stderr must be non-negative")
+
+    bulk_reference = None
+    if bulk_mu is not None:
+        bulk_reference = _expert_bulk_reference(config, workdir, bulk_mu, bulk_err)
+        LOG.warning(
+            "EXPERT OVERRIDE: using user-specified bulk mu_ex = %.4f +/- %.4f "
+            "kcal/mol; no bulk simulation or cache validation will be performed",
+            bulk_mu, bulk_err,
+        )
     dry_data = workdir / "dry" / "dry.data"
     if dry_data.exists() and not args.force:
         LOG.info("reusing the dry membrane in %s", dry_data.parent)
@@ -144,7 +159,10 @@ def cmd_run(args) -> int:
         dry = prepare_dry_membrane(config, workdir)
         typed_chains = dry.typed_chains
 
-    result = run_uptake(config, workdir, typed_chains, resume=not args.force)
+    result = run_uptake(
+        config, workdir, typed_chains, bulk_reference=bulk_reference,
+        resume=not args.force,
+    )
 
     result.to_dataframe().to_csv(workdir / "uptake_trajectory.csv", index=False)
     (workdir / "result.json").write_text(json.dumps(result.summary(), indent=2))
@@ -154,6 +172,44 @@ def cmd_run(args) -> int:
               "is a lower bound.", file=sys.stderr)
         return 2
     return 0
+
+
+def _expert_bulk_reference(config, workdir: Path, mu_ex: float, stderr: float):
+    """Construct an explicitly trusted bulk reference supplied by the user."""
+    import math
+
+    import numpy as np
+
+    from .bulk import BulkReference, BulkSettings, LITERATURE_DENSITY
+    from .driver import bulk_n_waters
+    from .widom import KB_KCAL, MIN_EFFECTIVE_SAMPLES, WidomEstimate
+
+    settings = BulkSettings(
+        water_model=config.water_model,
+        temperature=config.md.temperature,
+        pressure=config.md.pressure,
+        n_waters=bulk_n_waters(config.widom),
+        cutoff=config.md.cutoff,
+        kspace_accuracy=config.md.kspace_accuracy,
+        equil_steps=config.widom.bulk_equil_steps,
+        widom_steps=config.widom.n_blocks * config.widom.steps_per_block,
+        insertions_per_call=config.widom.insertions_per_call,
+        seed=config.widom.seed,
+    )
+    n_blocks = max(3, config.widom.n_blocks)
+    estimate = WidomEstimate(
+        mu_ex=float(mu_ex),
+        stderr=float(stderr),
+        temperature=config.md.temperature,
+        n_blocks=n_blocks,
+        block_values=np.full(n_blocks, float(mu_ex)),
+        mean_boltzmann=math.exp(-float(mu_ex) / (KB_KCAL * config.md.temperature)),
+        effective_samples=float(max(MIN_EFFECTIVE_SAMPLES, n_blocks)),
+        volume=config.widom.bulk_box_length ** 3,
+    )
+    density = LITERATURE_DENSITY.get(config.water_model.lower(), float("nan"))
+    return BulkReference(settings, estimate, density, estimate.volume,
+                         Path(workdir) / "bulk_override")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -175,6 +231,11 @@ def main(argv: list[str] | None = None) -> int:
     _add_common(p); _add_polymer(p)
     p.add_argument("--force", action="store_true",
                    help="rebuild the dry membrane and restart the loop")
+    p.add_argument("--bulk-mu-ex", type=float, metavar="KCAL_PER_MOL",
+                   help="expert override for bulk-water excess chemical potential; "
+                        "requires --bulk-stderr and bypasses the bulk simulation")
+    p.add_argument("--bulk-stderr", type=float, metavar="KCAL_PER_MOL",
+                   help="uncertainty for --bulk-mu-ex")
     p.set_defaults(func=cmd_run)
 
     args = parser.parse_args(argv)

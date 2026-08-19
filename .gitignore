@@ -14,5 +14,5 @@ htmlcov/
 *.restart
 log.lammps
 validation_run/
-aem_run/
+#aem_run/
 _view_*
