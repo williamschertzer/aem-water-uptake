@@ -37,8 +37,6 @@ thermo          500
 thermo_style    custom step temp press vol density etotal ke pe ebond eangle edihed evdwl ecoul elong
 thermo_modify   flush yes
 
-fix             shake_all all shake 0.0001 20 0 b 8 a 14
-
 timestep        1.0
 dump            traj all custom 1000 iter.lammpstrj id mol type q x y z
 dump_modify     traj sort id
@@ -55,6 +53,8 @@ unfix           temp_settle
 
 min_style       cg
 minimize        1e-06 1e-06 20000 200000
+
+fix             shake_all all shake 0.0001 20 0 b 8 a 14
 
 # ---------------------------------------------------------------- NPT ---------
 # Swelling is the point: the box must be free to expand as water goes in, so the
@@ -79,7 +79,10 @@ fix             w all widom 100 400 0 87236 300.0 mol h2o full_energy
 variable        muex equal f_w[1]
 variable        boltz equal f_w[2]
 variable        wvol equal f_w[3]
-fix             muavg all ave/time 100 100 10000 v_muex v_boltz v_wvol file mu.dat
+# Preserve one observation per Widom burst.  Python groups this raw time series
+# into contiguous blocks; averaging a whole block here leaves only n_blocks
+# values and makes the effective-sample-size diagnostic impossible.
+fix             muavg all ave/time 100 1 100 v_muex v_boltz v_wvol file mu.dat
 run             50000
 unfix           w
 unfix           muavg

@@ -76,7 +76,9 @@ fix             w all widom 100 400 0 31337 300.0 mol h2o full_energy
 variable        muex equal f_w[1]
 variable        boltz equal f_w[2]
 variable        wvol equal f_w[3]
-fix             muavg all ave/time 100 25 2500 v_muex v_boltz v_wvol file bulk_mu.dat
+# Write every insertion-burst observation.  Blocking and uncertainty estimation
+# are performed from this time series in aemwater.widom.
+fix             muavg all ave/time 100 1 100 v_muex v_boltz v_wvol file bulk_mu.dat
 run             50000
 
 write_data      bulk_final.data

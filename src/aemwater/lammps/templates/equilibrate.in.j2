@@ -12,6 +12,49 @@
 timestep        {{ md.timestep }}
 velocity        all create {{ md.temperature }} {{ seed }} mom yes rot yes dist gaussian
 
+{% if equil_schedule %}
+# ============================================================================
+# 21-step compression/decompression equilibration
+# Larsen, Lin & Colina, Macromolecules 44 (2011) 6944; the equilibration stage
+# of Polymatic (Abbott, Hart & Colina, Theor. Chem. Acc. 132 (2013) 1334).
+#
+# Seven cycles of (NVT hot / NVT cold / NPT cold), with the pressure ramped up
+# to {{ '%.0f'|format(equil.max_pressure) }} atm over cycles 1-3 and released
+# back to {{ md.pressure }} atm over cycles 4-7.
+#
+# The decompression half is the point. A single hot squeeze followed by one
+# release plateaus ~18% below the experimental density for this chemistry and
+# is still drifting upward when it stops; the leftover volume is void space,
+# which the water-uptake loop then fills instead of swelling the cell. Being
+# over-compressed and let out in stages, with a hot NVT relaxation between each
+# stage, is what collapses those voids rather than freezing them in.
+#
+# Total: {{ '%.0f'|format(equil_total_ps) }} ps at a {{ md.timestep }} fs timestep.
+# ============================================================================
+{% if md.dump_every > 0 %}
+dump            traj all custom {{ md.dump_every }} {{ dump_file }} id mol type q x y z
+dump_modify     traj sort id
+{% endif %}
+{% for s in equil_schedule %}
+{% if s.index == 21 %}
+
+# Density is averaged over the production step ONLY, so no part of the
+# compression schedule contaminates the reported value. The drift check in
+# prepare.py reads this same file and rejects a structure still densifying.
+variable        dens equal density
+variable        vol_ equal vol
+fix             avg_dens all ave/time {{ md.thermo_every }} {{ n_averages }} {{ md.thermo_every * n_averages }} v_dens v_vol_ file {{ density_file }}
+{% endif %}
+# -- step {{ "%2d"|format(s.index) }}/21: {{ s.ensemble|upper }} {{ "%.0f"|format(s.temperature) }} K{% if s.pressure is not none %}, {{ "%.4g"|format(s.pressure) }} atm{% endif %} -- {{ s.note }}
+{% if s.ensemble == 'nvt' %}
+fix             eq{{ s.index }} all nvt temp {{ s.temperature }} {{ s.temperature }} {{ md.tdamp }}
+{% else %}
+fix             eq{{ s.index }} all npt temp {{ s.temperature }} {{ s.temperature }} {{ md.tdamp }} iso {{ s.pressure }} {{ s.pressure }} {{ md.pdamp }}
+{% endif %}
+run             {{ s.steps(md.timestep) }}
+unfix           eq{{ s.index }}
+{% endfor %}
+{% else %}
 # ---------------------------------------------------------------- stage 3 ----
 # NVT at the packing volume: let the melt lose the memory of the packing
 # algorithm before the barostat starts changing the box.
@@ -68,6 +111,7 @@ variable        dens equal density
 variable        vol_ equal vol
 fix             avg_dens all ave/time {{ md.thermo_every }} {{ n_averages }} {{ md.thermo_every * n_averages }} v_dens v_vol_ file {{ density_file }}
 run             {{ stages.npt_prod_steps }}
+{% endif %}
 
 # Written WITH coefficients: each stage reads the previous stage's data file, so
 # the file has to be self-contained. `nocoeff` would force every downstream stage

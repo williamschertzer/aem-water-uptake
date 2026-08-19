@@ -1,0 +1,47 @@
+# Benzyltrimethylammonium-functionalised polystyrene: the canonical AEM model
+# system. Production-scale settings -- expect hours on a small cluster.
+polymer:
+  name: BTMA-PS
+  # Repeat unit with explicit backbone attachment points.
+  smiles: "[*]CC([*])c1ccc(C[N+](C)(C)C)cc1"
+  n_chains: 8
+  chain_length: 20
+  counterion: "Cl-"
+  terminal_group: "CH3"
+
+box:
+  initial_density: 0.20
+  target_density: 1.10
+  min_separation: 2.2
+  seed: 20260817
+
+md:
+  temperature: 300.0
+  pressure: 1.0
+  timestep: 1.0
+  cutoff: 10.0
+  soft_push_steps: 20000
+  anneal_steps: 50000
+  anneal_temperature: 600.0
+  compression_steps: 20000
+  dry_npt_steps: 200000
+  relax_npt_steps: 50000
+  dump_every: 1000
+  mpi_ranks: 4
+
+insertion:
+  batch_size: 20
+  min_batch_size: 2
+  grid_spacing: 0.5
+  probe_radius: 1.4
+  max_failed_batches: 3
+  max_iterations: 60
+
+widom:
+  enabled: true
+  n_blocks: 5
+  insertions_per_call: 400
+  steps_per_block: 10000
+
+water_model: spce
+workdir: runs/btma_ps_n8_l20

@@ -13,11 +13,11 @@ Log file: ./leap.log
 Loading parameters: /Users/william/Developments/Users/William/Developments/miniconda3/envs/aem/dat/leap/parm/gaff2.dat
 Reading title:
 AMBER General Force Field for organic molecules (Version 2.2.20, March 2021)
-Loading parameters: /Users/william/Developments/aem-water-uptake/aem_run/dry/typing/fragment/unit.frcmod
+Loading parameters: /Users/william/Developments/aem-water-uptake/runs/ex_cpu/dry/typing/fragment/unit.frcmod
 Reading force field modification type file (frcmod)
 Reading title:
 Remark line goes here
-Loading Mol2 file: /Users/william/Developments/aem-water-uptake/aem_run/dry/typing/chain.mol2
+Loading Mol2 file: /Users/william/Developments/aem-water-uptake/runs/ex_cpu/dry/typing/chain.mol2
 Reading MOLECULE named POL
 Checking Unit.
 

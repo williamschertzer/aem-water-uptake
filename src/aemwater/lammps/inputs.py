@@ -117,6 +117,101 @@ class StageSpec:
 
 
 @dataclass(frozen=True)
+class EquilStep:
+    """One step of the 21-step equilibration schedule.
+
+    ``ensemble`` is ``"nvt"`` or ``"npt"``. For NVT steps the pressure fields
+    are unused. Durations are in picoseconds so the table stays readable and
+    independent of the timestep; step counts are derived when rendering.
+    """
+
+    index: int
+    ensemble: str
+    temperature: float
+    ps: float
+    pressure: float | None = None
+    note: str = ""
+
+    def steps(self, timestep_fs: float) -> int:
+        """Step count for this stage, at least 1."""
+        return max(1, int(round(self.ps * 1000.0 / float(timestep_fs))))
+
+
+#: The 21-step compression/decompression schedule, as fractions of the
+#: configured maxima, from Larsen, Lin & Colina, *Macromolecules* 44 (2011)
+#: 6944 -- the equilibration stage of Polymatic (Abbott, Hart & Colina,
+#: Theor. Chem. Acc. 132 (2013) 1334).
+#:
+#: The pattern is seven cycles of (NVT hot, NVT cold, NPT cold). Pressure is
+#: ramped UP over cycles 1-3 to `max_pressure` and DOWN over cycles 4-7 to the
+#: operating pressure. The decompression half is what distinguishes this from a
+#: single squeeze-and-release: over-compressing and then letting out in stages,
+#: with a hot NVT relaxation between each, is what collapses the residual voids
+#: instead of freezing them in.
+#:
+#: Pressures are stored as fractions of `equilibration.max_pressure` so the
+#: peak is configurable while the *shape* of the ramp stays as published.
+#: Durations are the published values in ps; step 21 is overridden by
+#: `equilibration.final_npt_ps`.
+_TWENTY_ONE_STEP: tuple[tuple[str, float, float, float | None, str], ...] = (
+    # (ensemble, temperature_is_high, ps, pressure_fraction, note)
+    ("nvt", 1.0,  50.0, None,     "cycle 1: relax hot at the packing volume"),
+    ("nvt", 0.0,  50.0, None,     "cycle 1: quench to operating temperature"),
+    ("npt", 0.0,  50.0, 0.0002,   "cycle 1: compress at 0.02% of peak"),
+    ("nvt", 1.0,  50.0, None,     "cycle 2: relax hot"),
+    ("nvt", 0.0, 100.0, None,     "cycle 2: quench"),
+    ("npt", 0.0,  50.0, 0.006,    "cycle 2: compress at 0.6% of peak"),
+    ("nvt", 1.0,  50.0, None,     "cycle 3: relax hot"),
+    ("nvt", 0.0, 100.0, None,     "cycle 3: quench"),
+    ("npt", 0.0,  50.0, 1.0,      "cycle 3: compress at PEAK pressure"),
+    ("nvt", 1.0,  50.0, None,     "cycle 4: relax hot under no load"),
+    ("nvt", 0.0, 100.0, None,     "cycle 4: quench"),
+    ("npt", 0.0,   5.0, 0.5,      "cycle 4: decompress to 50% of peak"),
+    ("nvt", 1.0,   5.0, None,     "cycle 5: relax hot"),
+    ("nvt", 0.0,  10.0, None,     "cycle 5: quench"),
+    ("npt", 0.0,   5.0, 0.1,      "cycle 5: decompress to 10% of peak"),
+    ("nvt", 1.0,   5.0, None,     "cycle 6: relax hot"),
+    ("nvt", 0.0,  10.0, None,     "cycle 6: quench"),
+    ("npt", 0.0,   5.0, 0.01,     "cycle 6: decompress to 1% of peak"),
+    ("nvt", 1.0,   5.0, None,     "cycle 7: relax hot"),
+    ("nvt", 0.0,  10.0, None,     "cycle 7: quench"),
+    ("npt", 0.0, 800.0, 0.0,      "cycle 7: production NPT at operating pressure"),
+)
+
+
+def equilibration_schedule(md, equil) -> list[EquilStep]:
+    """Build the concrete equilibration schedule from the config.
+
+    Pressure fractions are resolved against ``equil.max_pressure``, with the
+    final step pinned to ``md.pressure`` exactly (a fraction of the peak would
+    leave the production stage at the wrong pressure, and the reported density
+    is averaged there). Durations are scaled by ``equil.time_scale`` so a smoke
+    test exercises all 21 stages rather than a different code path.
+    """
+    steps: list[EquilStep] = []
+    for i, (ensemble, hot, ps, frac, note) in enumerate(_TWENTY_ONE_STEP, start=1):
+        temperature = (float(equil.high_temperature) if hot
+                       else float(md.temperature))
+        # `time_scale` shortens the 20 schedule stages; step 21 is set directly
+        # by `final_npt_ps` and is NOT scaled again. Scaling it twice drove the
+        # production window below one `thermo_every` interval, so the density
+        # file came out empty and there was nothing for the gate to read.
+        duration = (float(equil.final_npt_ps) if i == 21
+                    else ps * float(equil.time_scale))
+        if ensemble == "npt":
+            # The last step must sit at the operating pressure exactly: it is
+            # the window the density is averaged over.
+            pressure = (float(md.pressure) if i == 21
+                        else float(frac) * float(equil.max_pressure))
+        else:
+            pressure = None
+        steps.append(EquilStep(index=i, ensemble=ensemble,
+                               temperature=temperature, ps=duration,
+                               pressure=pressure, note=note))
+    return steps
+
+
+@dataclass(frozen=True)
 class ConstraintSpec:
     """SHAKE settings.
 
@@ -386,6 +481,8 @@ __all__ = [
     "SoftPushSpec",
     "MinimiseSpec",
     "StageSpec",
+    "EquilStep",
+    "equilibration_schedule",
     "ConstraintSpec",
     "constraint_spec",
     "GroupSpec",

@@ -29,6 +29,28 @@ md:
   dump_every: 1000
   mpi_ranks: 1
 
+# Dry-membrane equilibration. The 21-step compression/decompression scheme
+# (Larsen, Lin & Colina, Macromolecules 44 (2011) 6944) replaces the single
+# squeeze-and-release cycle, which plateaued near 0.95 g/cm3 for this chemistry
+# -- ~18% below experiment -- with density still rising when the run ended. The
+# leftover volume is void space, and the uptake loop fills voids instead of
+# swelling the cell, which biases lambda high without bound.
+#
+# 1560 ps total at a 1 fs timestep, 800 ps of it the production NPT that the
+# density is averaged over. This dominates the cost of the dry stage.
+equilibration:
+  scheme: "21step"
+  max_pressure: 50000.0
+  high_temperature: 600.0
+  time_scale: 1.0
+  final_npt_ps: 800.0
+  # Refuse to hand an unconverged cell to the uptake loop.
+  enforce_convergence: true
+  # Experimental dry density for benzyltrimethylammonium polystyrene, g/cm3.
+  expected_density: 1.15
+  density_tolerance: 0.08
+  drift_tolerance: 0.002
+
 insertion:
   batch_fraction: 0.50
   batch_size: 50

@@ -127,17 +127,29 @@ def test_render_calls_supply_every_template_variable(module_file):
 
 # ------------------------------------------------------- rendered behaviour --
 def _equilibrate_context(**overrides):
-    from aemwater.lammps.inputs import ConstraintSpec, GroupSpec, stage_spec
+    """Mirror the context `prepare.py` renders equilibrate.in.j2 with.
+
+    `equil_schedule` decides which of the two schemes the template emits, so it
+    is part of the contract: passing `equil_schedule=None` selects the legacy
+    single-squeeze path.
+    """
+    from aemwater.lammps.inputs import (
+        ConstraintSpec, GroupSpec, equilibration_schedule, stage_spec,
+    )
 
     from aemwater.config import PolymerSpec, RunConfig
 
     config = RunConfig(polymer=PolymerSpec(smiles="[*]CC[*]"))
     md = overrides.pop("md", config.md)
+    equil = overrides.pop("equil", config.equilibration)
+    schedule = equilibration_schedule(md, equil) if equil.scheme == "21step" else None
     context = dict(
         md=md, title="t", data_file="a.data", out_data="b.data",
         out_restart="b.rst", density_file="d.dat", dump_file="t.lammpstrj",
         stages=stage_spec(md), n_averages=10, comm_cutoff=12.0,
         extra_types=None, seed=1,
+        equil=equil, equil_schedule=schedule,
+        equil_total_ps=(sum(s.ps for s in schedule) if schedule else None),
         pair_coeff_lines=["pair_coeff 1 1 0.1 3.0"],
         constraints=ConstraintSpec(shake_water=False, shake_hydrogen=True),
         groups=GroupSpec(n_polymer_molecules=4, n_ion_molecules=8),
@@ -227,7 +239,114 @@ def test_insert_enables_shake_only_after_nve_limit_is_removed(tmp_path):
     assert text.index("minimize") < text.index("fix             shake_all")
 
 
-def test_equilibration_densifies_under_load_before_releasing(tmp_path):
+def test_21step_schedule_matches_the_published_protocol():
+    """The schedule table is the protocol; pin its checkable properties.
+
+    Larsen, Lin & Colina, Macromolecules 44 (2011) 6944: 21 steps, 1560 ps at a
+    1 fs timestep, 14 NVT and 7 NPT stages, peak 50 000 atm reached at step 9,
+    and the pressure released back to the operating value by step 21.
+    """
+    from aemwater.config import PolymerSpec, RunConfig
+    from aemwater.lammps.inputs import equilibration_schedule
+
+    config = RunConfig(polymer=PolymerSpec(smiles="[*]CC[*]"))
+    sched = equilibration_schedule(config.md, config.equilibration)
+
+    assert len(sched) == 21
+    assert sum(s.ps for s in sched) == pytest.approx(1560.0)
+    assert sum(1 for s in sched if s.ensemble == "nvt") == 14
+    assert sum(1 for s in sched if s.ensemble == "npt") == 7
+
+    pressures = [s.pressure for s in sched if s.pressure is not None]
+    assert max(pressures) == pytest.approx(config.equilibration.max_pressure)
+    assert sched[8].pressure == pytest.approx(config.equilibration.max_pressure), \
+        "peak compression is step 9"
+
+    # Monotone up to the peak, monotone down after it -- that shape is the
+    # compression/decompression cycle, and it is what a single squeeze lacks.
+    up = [s.pressure for s in sched[:9] if s.pressure is not None]
+    down = [s.pressure for s in sched[9:] if s.pressure is not None]
+    assert up == sorted(up), up
+    assert down == sorted(down, reverse=True), down
+
+    # The production step must end at the operating pressure exactly: it is the
+    # window density is averaged over.
+    assert sched[-1].ensemble == "npt"
+    assert sched[-1].pressure == pytest.approx(config.md.pressure)
+
+    # Hot excursions are above Tg; quenches are at the operating temperature.
+    hot = {s.temperature for s in sched if s.temperature != config.md.temperature}
+    assert hot == {config.equilibration.high_temperature}
+
+
+def test_time_scale_keeps_every_stage(tmp_path):
+    """A scaled-down run must exercise all 21 stages, not a shorter scheme.
+
+    A smoke test that silently dropped stages would not test the code path the
+    production run takes.
+    """
+    import dataclasses
+
+    from aemwater.config import PolymerSpec, RunConfig
+    from aemwater.lammps.inputs import equilibration_schedule
+
+    config = RunConfig(polymer=PolymerSpec(smiles="[*]CC[*]"))
+    fast = dataclasses.replace(config.equilibration, time_scale=0.02,
+                               final_npt_ps=50.0)
+    sched = equilibration_schedule(config.md, fast)
+
+    assert len(sched) == 21
+    assert all(s.steps(config.md.timestep) >= 1 for s in sched), \
+        "no stage may round down to zero steps"
+    assert sum(s.ps for s in sched) < 100.0
+    # Pressures and temperatures are unchanged by scaling.
+    assert max(s.pressure for s in sched if s.pressure is not None) == \
+        pytest.approx(fast.max_pressure)
+
+
+def test_21step_render_emits_every_stage_and_averages_only_production(tmp_path):
+    """All 21 runs appear, and density averaging starts inside step 21 only.
+
+    If `fix ave/time` were emitted before the last stage, the reported density
+    would average over the 50 000 atm compression -- the reported value would be
+    high and the drift check would be measuring the schedule, not the polymer.
+    """
+    from aemwater.lammps.inputs import render_input
+
+    out = tmp_path / "in.equilibrate"
+    render_input("equilibrate.in.j2", out, **_equilibrate_context())
+    text = out.read_text()
+    lines = text.splitlines()
+
+    runs = [l for l in lines if l.split()[:1] == ["run"]]
+    assert len(runs) == 21, f"expected 21 run commands, got {len(runs)}"
+    # Every run must carry an integer step count. `run {{ s.steps }}` silently
+    # rendered a bound method here once -- LAMMPS would have died on stage 1.
+    for l in runs:
+        assert int(l.split()[1]) >= 1, f"run needs an integer step count: {l!r}"
+
+    fixes = [l for l in lines
+             if l.split()[:1] == ["fix"] and l.split()[1].startswith("eq")]
+    assert len(fixes) == 21
+    assert sum(1 for l in fixes if " npt " in l) == 7
+    assert sum(1 for l in fixes if " nvt " in l) == 14
+    # Every fix is released, or LAMMPS integrates twice.
+    assert len([l for l in lines if l.split()[:1] == ["unfix"]
+                and l.split()[1].startswith("eq")]) == 21
+
+    # The averaging fix sits after the 20th run and before the 21st.
+    avg_index = next(i for i, l in enumerate(lines) if "avg_dens" in l)
+    runs_before = sum(1 for l in lines[:avg_index] if l.split()[:1] == ["run"])
+    assert runs_before == 20, \
+        f"averaging must begin after 20 runs, begins after {runs_before}"
+
+    # Peak pressure must actually appear in a fix line.
+    assert any("50000" in l for l in fixes), \
+        "the peak compression pressure must reach the rendered deck"
+    assert "{{" not in text and "}}" not in text
+
+
+def test_legacy_equilibration_densifies_under_load_before_releasing(tmp_path):
     """The squeeze must run at compression_pressure, and release before output.
 
     Compressing at the operating pressure does not densify on an affordable
@@ -235,6 +354,10 @@ def test_equilibration_densifies_under_load_before_releasing(tmp_path):
     dry AEM, and reported it as converged. The missing density is void space,
     which is exactly what the insertion loop then fills, so the error inflates
     every uptake number downstream. This pins the ordering.
+
+    Scoped to ``scheme="legacy"``. The default is now the 21-step scheme, which
+    has its own ordering test below; this one keeps the legacy path honest for
+    as long as it is selectable.
     """
     import dataclasses
 
@@ -243,9 +366,11 @@ def test_equilibration_densifies_under_load_before_releasing(tmp_path):
 
     config = RunConfig(polymer=PolymerSpec(smiles="[*]CC[*]"))
     md = dataclasses.replace(config.md, pressure=1.0, compression_pressure=1000.0)
+    equil = dataclasses.replace(config.equilibration, scheme="legacy")
 
     out = tmp_path / "in.equilibrate"
-    render_input("equilibrate.in.j2", out, **_equilibrate_context(md=md))
+    render_input("equilibrate.in.j2", out,
+                 **_equilibrate_context(md=md, equil=equil))
     lines = out.read_text().splitlines()
 
     npt = [(i, l) for i, l in enumerate(lines)

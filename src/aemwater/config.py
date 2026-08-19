@@ -111,6 +111,122 @@ class BoxSpec:
 
 
 @dataclass(frozen=True)
+class EquilibrationSpec:
+    """Dry-membrane equilibration schedule.
+
+    The default is the 21-step compression/decompression scheme of Larsen,
+    Lin and Colina (Macromolecules 2011; also the equilibration stage of
+    Polymatic, Abbott/Colina 2013), which is the standard route to a
+    converged amorphous glassy polymer density.
+
+    Why it works where a single squeeze does not. Collapsing a loose packing
+    to glassy density is not a barostat problem, it is a sampling problem: the
+    chains have to find melt conformations, and at 300 K they cannot. The
+    scheme interleaves seven NVT excursions to ``high_temperature`` -- above
+    Tg, where chains interpenetrate -- with NPT compressions, and it *ramps
+    the pressure up to ``max_pressure`` and then back down to
+    ``md.pressure``*. The decompression half is the part that a naive
+    "compress hard then release" cycle omits, and it is what removes the
+    residual voids: the structure is repeatedly over-compressed, allowed to
+    relax hot, and then let out in stages, so the final density is approached
+    from the dense side at every scale rather than once at the end.
+
+    The measured failure mode this replaces is recorded in
+    ``equilibrate.in.j2`` and in the run logs: a single hot squeeze plus
+    release plateaus around 0.95 g/cm^3 for BTMA-polystyrene, ~18% below
+    experiment, with density still drifting upward when the run ends. The
+    missing 18% is void space, and the water-uptake loop then fills it --
+    giving a *negative* partial molar volume for water (the cell contracts as
+    water is added) and an uptake number biased high without limit.
+
+    Attributes
+    ----------
+    scheme:
+        ``"21step"`` (default) or ``"legacy"`` for the single-squeeze cycle
+        driven by ``md.anneal_steps`` / ``md.compression_steps``.
+    max_pressure:
+        Peak compression pressure, atm. 50 000 atm is the literature value.
+    high_temperature:
+        NVT excursion temperature, K. Must be above Tg.
+    time_scale:
+        Multiplies the duration of steps 1-20. 1.0 reproduces the published
+        table; use ~0.01 for smoke tests. Does not change the pressure or
+        temperature schedule, so a scaled run exercises the same code path
+        rather than a different one. Step 21 is *not* scaled -- see below.
+    final_npt_ps:
+        Duration of step 21, the production NPT from which density is
+        averaged, in ps. The published value is 800 ps and it dominates the
+        cost of the dry stage. Set directly rather than scaled by
+        ``time_scale``: this window has to stay longer than several
+        ``md.thermo_every`` intervals or the density file comes out empty and
+        the convergence gate has nothing to read.
+    """
+
+    scheme: str = "21step"
+    max_pressure: float = 50_000.0
+    high_temperature: float = 600.0
+    time_scale: float = 1.0
+    final_npt_ps: float = 800.0
+
+    # --- convergence gate ---------------------------------------------------
+    #: Refuse to hand a dry membrane to the uptake loop unless it converged.
+    #: The uptake number is meaningless otherwise (see class docstring), so the
+    #: default is to fail loudly rather than produce a plausible wrong answer.
+    enforce_convergence: bool = True
+    #: Expected dry density, g/cm^3. ``None`` falls back to
+    #: ``box.target_density``. For quaternary-ammonium polystyrene with
+    #: halide/hydroxide counterions the experimental range is 1.10-1.25.
+    expected_density: float | None = None
+    #: Accepted fractional deviation from ``expected_density``.
+    density_tolerance: float = 0.05
+    #: Maximum |d(rho)/dt| over the production window, g/cm^3 per 100 ps.
+    #: A structure still densifying is still equilibrating.
+    drift_tolerance: float = 0.002
+
+    def validate(self) -> None:
+        _check(
+            self.scheme in ("21step", "legacy"),
+            f"equilibration.scheme must be '21step' or 'legacy' (got {self.scheme!r})",
+        )
+        _check(
+            self.max_pressure > 0,
+            "equilibration.max_pressure must be positive",
+        )
+        _check(
+            self.high_temperature > 0,
+            "equilibration.high_temperature must be positive",
+        )
+        _check(
+            0 < self.time_scale <= 10.0,
+            "equilibration.time_scale must be in (0, 10]",
+        )
+        _check(
+            self.final_npt_ps > 0,
+            "equilibration.final_npt_ps must be positive",
+        )
+        _check(
+            0 < self.density_tolerance < 1.0,
+            "equilibration.density_tolerance must be a fraction in (0, 1)",
+        )
+        _check(
+            self.drift_tolerance > 0,
+            "equilibration.drift_tolerance must be positive",
+        )
+        if self.expected_density is not None:
+            _check(
+                0.1 < self.expected_density < 3.0,
+                "equilibration.expected_density must be in (0.1, 3.0) g/cm^3",
+            )
+        if self.scheme == "21step" and self.max_pressure < 1000.0:
+            LOG.warning(
+                "equilibration.max_pressure = %.0f atm is far below the 50000 atm "
+                "the 21-step scheme is defined with; the compression half will "
+                "not densify the cell.",
+                self.max_pressure,
+            )
+
+
+@dataclass(frozen=True)
 class MDSpec:
     """MD engine settings shared by every LAMMPS stage."""
 
@@ -244,6 +360,7 @@ class RunConfig:
     polymer: PolymerSpec
     box: BoxSpec = field(default_factory=BoxSpec)
     md: MDSpec = field(default_factory=MDSpec)
+    equilibration: EquilibrationSpec = field(default_factory=EquilibrationSpec)
     insertion: InsertionSpec = field(default_factory=InsertionSpec)
     widom: WidomSpec = field(default_factory=WidomSpec)
     water_model: str = "spce"
@@ -253,8 +370,18 @@ class RunConfig:
         self.validate()
 
     def validate(self) -> None:
-        for sub in (self.polymer, self.box, self.md, self.insertion, self.widom):
+        for sub in (self.polymer, self.box, self.md, self.equilibration,
+                    self.insertion, self.widom):
             sub.validate()
+        _check(
+            self.equilibration.high_temperature > self.md.temperature,
+            "equilibration.high_temperature must exceed md.temperature; the "
+            "NVT excursions have to be above Tg to let chains relax",
+        )
+        _check(
+            self.equilibration.max_pressure > self.md.pressure,
+            "equilibration.max_pressure must exceed md.pressure",
+        )
         _check(
             self.water_model in SUPPORTED_WATER_MODELS,
             f"water_model must be one of {SUPPORTED_WATER_MODELS} (got {self.water_model!r})",
@@ -302,6 +429,7 @@ class RunConfig:
             "polymer": PolymerSpec,
             "box": BoxSpec,
             "md": MDSpec,
+            "equilibration": EquilibrationSpec,
             "insertion": InsertionSpec,
             "widom": WidomSpec,
         }
@@ -346,6 +474,7 @@ __all__ = [
     "PolymerSpec",
     "BoxSpec",
     "MDSpec",
+    "EquilibrationSpec",
     "InsertionSpec",
     "WidomSpec",
     "RunConfig",

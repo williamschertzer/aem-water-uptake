@@ -18,6 +18,7 @@ from aemwater.lammps.inputs import (
     ConstraintSpec,
     GroupSpec,
     comm_cutoff,
+    equilibration_schedule,
     minimise_spec,
     render_input,
     soft_push_spec,
@@ -138,6 +139,9 @@ def _render_for_test(template, tmp_path):
         full_energy=True, water_template="h2o.mol",
         n_widom_samples=10, widom_window=1000, widom_steps=1000,
         equil_steps=100, vol_file="vol.dat", out_file="out.dat",
+        equil=cfg.equilibration,
+        equil_schedule=equilibration_schedule(md, cfg.equilibration),
+        equil_total_ps=1560.0,
     )
     out = render_input(template, tmp_path / template.replace(".j2", ""), **ctx)
     return out.read_text()

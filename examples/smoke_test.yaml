@@ -26,6 +26,20 @@ md:
   thermo_every: 200
   mpi_ranks: 1
 
+# All 21 stages run, scaled to ~31 ps total, so the smoke test exercises the
+# same code path as production rather than a shorter alternative scheme. The
+# convergence gate is off here: this system is deliberately too small and too
+# short to converge, and the point of the smoke test is that the pipeline
+# executes end to end.
+equilibration:
+  scheme: "21step"
+  max_pressure: 50000.0
+  high_temperature: 500.0
+  time_scale: 0.01
+  # 15 ps at thermo_every=200 gives 15000 steps -> plenty of density samples.
+  final_npt_ps: 15.0
+  enforce_convergence: false
+
 insertion:
   batch_size: 8
   min_batch_size: 2

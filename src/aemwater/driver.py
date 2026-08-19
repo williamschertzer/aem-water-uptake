@@ -147,6 +147,10 @@ class UptakeResult:
     bulk_mu_ex: float
     workdir: Path
     composition: dict[str, object] = field(default_factory=dict)
+    #: The dry stage's convergence record, or None if the dry membrane predates
+    #: the gate. A result built on an unconverged dry cell is a lower bound at
+    #: best, and that has to be visible in the saved state, not only in a log.
+    dry_convergence: dict[str, object] | None = None
 
     def summary(self) -> dict[str, object]:
         return {
@@ -159,6 +163,9 @@ class UptakeResult:
             "stop_reason": self.stop_reason,
             "converged": self.converged,
             "iterations": len(self.iterations),
+            "dry_converged": (None if self.dry_convergence is None
+                              else bool(self.dry_convergence.get("converged"))),
+            "dry_convergence": self.dry_convergence,
         }
 
     def to_dataframe(self):
@@ -566,6 +573,31 @@ def run_uptake(
     coords, elements, edge = _read_final_state(dry_data)
     dry_density = dry_mass / (6.02214076e23 * (edge * 1e-8) ** 3)
 
+    # The uptake number inherits the dry cell's quality, so carry that
+    # judgement forward instead of leaving it in the prepare-stage log. A
+    # membrane that had not finished densifying keeps densifying once water is
+    # in it, which shows up as water apparently shrinking the cell and a
+    # lambda biased high by void filling. This is a read, not a re-check: the
+    # dry stage may have run days ago or under a different config.
+    dry_convergence: dict[str, object] | None = None
+    conv_file = workdir / "dry" / "convergence.json"
+    if conv_file.exists():
+        try:
+            dry_convergence = json.loads(conv_file.read_text())
+        except (OSError, ValueError) as exc:  # pragma: no cover - defensive
+            LOG.warning("could not read %s: %s", conv_file, exc)
+    if dry_convergence is None:
+        LOG.warning(
+            "no dry-stage convergence record at %s -- the dry membrane predates "
+            "the convergence gate, so its density is unverified", conv_file)
+    elif not dry_convergence.get("converged"):
+        LOG.warning(
+            "dry membrane did NOT pass its convergence check (%.4f g/cm3, "
+            "drift %+.4f g/cm3 per 100 ps). Uptake from this cell is likely "
+            "biased high by void filling.",
+            dry_convergence.get("density_g_cm3", float("nan")),
+            dry_convergence.get("drift_g_cm3_per_100ps", float("nan")))
+
     model = get_water_model(config.water_model)
     typed_cache = workdir / "typing"
     iterations: list[Iteration] = []
@@ -716,6 +748,7 @@ def run_uptake(
         bulk_mu_ex=bulk_reference.mu_ex.mu_ex,
         workdir=workdir,
         composition=comp.summary() if hasattr(comp, "summary") else {},
+        dry_convergence=dry_convergence,
     )
 
 
