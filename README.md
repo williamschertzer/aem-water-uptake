@@ -141,6 +141,19 @@ pytest                     # 179 tests, no LAMMPS required
 
 ## Usage
 
+### Phoenix GPU job
+
+The bundled Slurm script requests one GPU on the Phoenix `embers` QOS and
+loads the cluster's CUDA-enabled LAMMPS build:
+
+```bash
+sbatch examples/submit_phoenix_gpu.slurm
+```
+
+GPU switches are passed to every LAMMPS stage through
+`AEMWATER_LAMMPS_ARGS`. The script deliberately uses one MPI rank per GPU;
+increase both together only when requesting additional GPUs.
+
 ### Three phases, separately invocable
 
 ```bash

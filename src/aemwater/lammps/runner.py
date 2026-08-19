@@ -12,6 +12,7 @@ workflow that would run perfectly well on one core.
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -112,6 +113,7 @@ def run_lammps(
     log_name: str | None = None,
     env: dict[str, str] | None = None,
     timeout: float | None = None,
+    extra_args: list[str] | None = None,
 ) -> LammpsRun:
     """Run one LAMMPS input script and parse its log.
 
@@ -127,7 +129,12 @@ def run_lammps(
 
     cap = probe_lammps(binary, launcher)
     use_ranks = 1
-    cmd = [cap.binary, "-in", input_file.name, "-log", log_file.name]
+    # Accelerator and machine-specific switches can be supplied without
+    # baking a particular cluster's LAMMPS build into the scientific config.
+    # For example: AEMWATER_LAMMPS_ARGS='-sf gpu -pk gpu 1'.
+    env_args = shlex.split(os.environ.get("AEMWATER_LAMMPS_ARGS", ""))
+    lammps_args = list(extra_args) if extra_args is not None else env_args
+    cmd = [cap.binary, *lammps_args, "-in", input_file.name, "-log", log_file.name]
     if ranks > 1:
         if cap.parallel:
             use_ranks = min(ranks, cap.max_ranks)
