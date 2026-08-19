@@ -1,0 +1,44 @@
+# Rigid water for Widom test insertions.
+#
+# The Bonds and Angles sections are load-bearing even though the molecule is
+# rigid and never integrated. LAMMPS applies `special_bonds` exclusions through
+# the bond topology, so a template without bonds leaves the molecule's own O-H
+# and H-H Coulomb interactions in the insertion energy. For SPC/E that is about
+# -202 kcal/mol of pure self-interaction added to every trial, which swamps the
+# real solvation free energy completely.
+3 atoms
+2 bonds
+1 angles
+
+Coords
+
+1 0.000000 0.000000 0.000000
+2 0.816490 0.000000 0.577359
+3 -0.816490 0.000000 0.577359
+
+Types
+
+1 8
+2 9
+3 9
+
+Charges
+
+1 -0.847600
+2 0.423800
+3 0.423800
+
+Masses
+
+1 15.999400
+2 1.008000
+3 1.008000
+
+Bonds
+
+1 8 1 2
+2 8 1 3
+
+Angles
+
+1 14 2 1 3

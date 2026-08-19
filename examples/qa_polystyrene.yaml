@@ -26,6 +26,7 @@ md:
   compression_steps: 20000
   dry_npt_steps: 200000
   relax_npt_steps: 50000
+  dump_every: 1000
   mpi_ranks: 4
 
 insertion:

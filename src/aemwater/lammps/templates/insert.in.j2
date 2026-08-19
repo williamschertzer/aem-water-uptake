@@ -6,6 +6,10 @@
 {% endif %}
 
 timestep        {{ md.timestep }}
+{% if md.dump_every > 0 -%}
+dump            traj all custom {{ md.dump_every }} {{ dump_file }} id mol type q x y z
+dump_modify     traj sort id
+{% endif %}
 {% if velocity_create -%}
 velocity        all create {{ md.temperature }} {{ seed }} mom yes rot yes dist gaussian
 {% endif %}

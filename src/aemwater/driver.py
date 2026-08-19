@@ -310,6 +310,32 @@ def _read_final_state(data_file: Path) -> tuple[np.ndarray, list[str], float]:
     return coords, elements, edge
 
 
+def _resume_data_file(
+    workdir: Path,
+    dry_data: Path,
+    iterations: list[Iteration],
+) -> Path:
+    """Return the structure that a resumed uptake loop must continue from.
+
+    A checkpoint records an iteration only after LAMMPS has written that
+    iteration's ``relaxed.data`` and the driver has reduced its outputs. The
+    next batch must therefore start from the last checkpointed relaxed
+    structure, not from the dry membrane.
+    """
+    if not iterations:
+        return dry_data
+
+    last = iterations[-1]
+    relaxed = workdir / f"iter_{last.index:03d}" / "relaxed.data"
+    if not relaxed.exists():
+        raise DriverError(
+            f"uptake checkpoint ends at iteration {last.index}, but its relaxed "
+            f"structure is missing: {relaxed}. Restore that file or restart the "
+            "uptake loop from the dry membrane with --force."
+        )
+    return relaxed
+
+
 def _write_state(path: Path, payload: dict) -> None:
     """Checkpoint the loop so an interrupted run resumes instead of restarting."""
     path.write_text(json.dumps(payload, indent=2, default=str))
@@ -552,7 +578,18 @@ def run_uptake(
         n_waters = saved.get("n_waters", 0)
         mu_gap = saved.get("mu_gap")
         stderr = saved.get("stderr", 0.0)
-        LOG.info("resuming at iteration %d with %d waters", len(iterations), n_waters)
+        if iterations and n_waters != iterations[-1].n_waters_after:
+            raise DriverError(
+                f"uptake checkpoint records {n_waters} waters globally but "
+                f"iteration {iterations[-1].index} ended with "
+                f"{iterations[-1].n_waters_after}; refusing an inconsistent resume"
+            )
+        resume_data = _resume_data_file(workdir, dry_data, iterations)
+        coords, elements, edge = _read_final_state(resume_data)
+        LOG.info(
+            "resuming at iteration %d with %d waters from %s",
+            len(iterations), n_waters, resume_data,
+        )
 
     for step in range(len(iterations), config.insertion.max_iterations):
         t0 = time.time()

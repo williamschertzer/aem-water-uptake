@@ -15,6 +15,7 @@ from aemwater.driver import (
     Iteration,
     UptakeResult,
     _read_final_state,
+    _resume_data_file,
     bulk_n_waters,
     hydration_number,
     next_batch_size,
@@ -137,6 +138,29 @@ def test_missing_box_is_an_error(tmp_path):
     p.write_text("LAMMPS data\n\n1 atoms\n")
     with pytest.raises(DriverError, match="box"):
         _read_final_state(p)
+
+
+def test_fresh_uptake_uses_the_dry_structure(tmp_path):
+    dry = tmp_path / "dry" / "dry.data"
+    assert _resume_data_file(tmp_path, dry, []) == dry
+
+
+def test_resume_uses_the_last_checkpointed_relaxed_structure(tmp_path):
+    """Previously a resume silently reloaded dry.data and lost every water."""
+    dry = tmp_path / "dry" / "dry.data"
+    relaxed = tmp_path / "iter_004" / "relaxed.data"
+    relaxed.parent.mkdir()
+    relaxed.write_text("completed hydrated structure")
+    iterations = [_iteration(i, (i + 1) * 20, -8.0) for i in range(5)]
+
+    assert _resume_data_file(tmp_path, dry, iterations) == relaxed
+
+
+def test_resume_rejects_a_missing_relaxed_structure(tmp_path):
+    iterations = [_iteration(3, 80, -8.0)]
+
+    with pytest.raises(DriverError, match=r"iteration 3.*relaxed structure is missing"):
+        _resume_data_file(tmp_path, tmp_path / "dry" / "dry.data", iterations)
 
 
 # ------------------------------------------------------------------- results --
