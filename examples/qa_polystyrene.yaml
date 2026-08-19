@@ -27,11 +27,7 @@ md:
   dry_npt_steps: 200000
   relax_npt_steps: 50000
   dump_every: 1000
-<<<<<<< Updated upstream
-  mpi_ranks: 4
-=======
   mpi_ranks: 1
->>>>>>> Stashed changes
 
 insertion:
   batch_fraction: 0.50

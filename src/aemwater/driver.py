@@ -583,7 +583,6 @@ def run_uptake(
         n_waters = saved.get("n_waters", 0)
         mu_gap = saved.get("mu_gap")
         stderr = saved.get("stderr", 0.0)
-<<<<<<< Updated upstream
         if iterations and n_waters != iterations[-1].n_waters_after:
             raise DriverError(
                 f"uptake checkpoint records {n_waters} waters globally but "
@@ -592,16 +591,12 @@ def run_uptake(
             )
         resume_data = _resume_data_file(workdir, dry_data, iterations)
         coords, elements, edge = _read_final_state(resume_data)
-        LOG.info(
-            "resuming at iteration %d with %d waters from %s",
-            len(iterations), n_waters, resume_data,
-=======
         failed_batches = saved.get("failed_batches", 0)
         start_step = saved.get("next_step", len(iterations))
         LOG.info(
-            "resuming at iteration %d with %d waters (%d consecutive geometric shortfalls)",
-            start_step, n_waters, failed_batches,
->>>>>>> Stashed changes
+            "resuming at iteration %d with %d waters from %s "
+            "(%d consecutive geometric shortfalls)",
+            start_step, n_waters, resume_data, failed_batches,
         )
 
     for step in range(start_step, config.insertion.max_iterations):
