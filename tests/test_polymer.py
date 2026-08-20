@@ -16,6 +16,10 @@ from aemwater.polymer import (
 )
 
 BTMA_PS = "[*]CC([*])c1ccc(C[N+](C)(C)C)cc1"
+IM_PEEK = (
+    "[*]C1=CC=C(C(C2=CC=C(OC3=C(C[N+]4=CN(C)C=C4)C=C(O[*])C=C3)"
+    "C=C2)=O)C=C1"
+)
 
 
 @pytest.fixture(scope="module")
@@ -87,6 +91,21 @@ def test_segment_topology_has_no_leftover_attachment_hydrogens(unit):
     mol, backbone = build_segment(unit, 3, seed=1)
     assert len(backbone) == 6
     assert Chem.GetFormalCharge(mol) == 3
+
+
+def test_asymmetric_carbon_oxygen_endpoints_survive_segment_docking():
+    """Logical head/tail order must not assume directly bonded vinyl endpoints."""
+    chain = build_chain(IM_PEEK, 5, seed=20260817, terminal_group="CH3", relax=False)
+
+    assert chain.formal_charge == 5
+    assert len(chain.backbone) == 10
+    assert [chain.mol.GetAtomWithIdx(i).GetSymbol() for i in chain.backbone] == [
+        symbol for _ in range(5) for symbol in ("C", "O")
+    ]
+    for left_tail, right_head in zip(chain.backbone[1::2][:-1], chain.backbone[2::2]):
+        assert chain.mol.GetBondBetweenAtoms(left_tail, right_head) is not None
+    for atom in chain.mol.GetAtoms():
+        assert atom.GetExplicitValence() <= atom.GetTotalValence()
 
 
 def test_rejects_zero_length(unit):

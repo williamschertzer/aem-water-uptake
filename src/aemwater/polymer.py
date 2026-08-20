@@ -320,33 +320,13 @@ def _cap_termini(mol: Chem.Mol, backbone: list[int], terminal_group: str) -> Che
     return out
 
 
-def _backbone_order(mol: Chem.Mol, backbone_candidates: Sequence[int]) -> list[int]:
-    """Order backbone atoms by walking the chain from one end."""
-    cand = set(backbone_candidates)
-    if not cand:
-        return []
-    sub = {i: [n.GetIdx() for n in mol.GetAtomWithIdx(i).GetNeighbors() if n.GetIdx() in cand]
-           for i in cand}
-    ends = [i for i, nbrs in sub.items() if len(nbrs) == 1]
-    start = min(ends) if ends else min(cand)
-    order = [start]
-    prev = None
-    while True:
-        nxt = [n for n in sub[order[-1]] if n != prev and n not in order]
-        if not nxt:
-            break
-        prev = order[-1]
-        order.append(nxt[0])
-    return order
-
-
 def _grow_coil(
     unit: RepeatUnit,
     chain_length: int,
     seed: int,
     segment_length: int,
     torsion_jitter: float,
-) -> Chem.Mol:
+) -> tuple[Chem.Mol, list[int]]:
     """Build a chain by docking independently embedded segments end to end."""
     rng = np.random.default_rng(seed)
     n_segments = max(1, math.ceil(chain_length / segment_length))
@@ -360,7 +340,6 @@ def _grow_coil(
     for k, size in enumerate(sizes):
         seg_mol, seg_backbone = build_segment(unit, size, seed=int(rng.integers(1, 2**31 - 1)))
         seg_mol = _embed(seg_mol, seed=int(rng.integers(1, 2**31 - 1)))
-        seg_backbone = _backbone_order(seg_mol, seg_backbone)
         if chain is None:
             chain, chain_backbone = seg_mol, seg_backbone
             continue
@@ -368,7 +347,7 @@ def _grow_coil(
             chain, chain_backbone, unit, size, rng, torsion_jitter, seg_mol, seg_backbone
         )
     assert chain is not None
-    return chain
+    return chain, chain_backbone
 
 
 def _trial_placement(
@@ -543,7 +522,6 @@ def _dock_with_retries(
         if round_idx > 0:
             seg_mol, seg_backbone = build_segment(unit, size, seed=int(rng.integers(1, 2**31 - 1)))
             seg_mol = _embed(seg_mol, seed=int(rng.integers(1, 2**31 - 1)))
-            seg_backbone = _backbone_order(seg_mol, seg_backbone)
         candidate, cand_backbone = _dock_segment(
             chain, chain_backbone, seg_mol, seg_backbone, rng, torsion_jitter
         )
@@ -717,12 +695,10 @@ def build_chain(
     if chain_length <= segment_length:
         mol, backbone = build_segment(unit, chain_length, seed=seed)
         mol = _embed(mol, seed=seed)
-        backbone = _backbone_order(mol, backbone)
     else:
-        mol = _grow_coil(unit, chain_length, seed, segment_length, torsion_jitter)
-        backbone = _backbone_order(mol, [
-            a.GetIdx() for a in mol.GetAtoms() if a.HasProp(BACKBONE_PROP)
-        ])
+        mol, backbone = _grow_coil(
+            unit, chain_length, seed, segment_length, torsion_jitter
+        )
 
     mol = _cap_termini(mol, backbone, terminal_group)
     if mol.GetNumConformers() == 0:  # pragma: no cover
@@ -734,7 +710,6 @@ def build_chain(
         mol = _relax_junctions(mol)
         mol = _relieve_clashes(mol)
 
-    backbone = _backbone_order(mol, [a.GetIdx() for a in mol.GetAtoms() if a.HasProp(BACKBONE_PROP)])
     chain = Chain(mol=mol, chain_length=chain_length, repeat_unit=unit, backbone=backbone)
     LOG.info(
         "built chain: %d units, %d atoms, charge %+d, Rg = %.2f A, Ree = %.2f A",
