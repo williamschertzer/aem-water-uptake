@@ -129,7 +129,16 @@ For a quick check of the whole pipeline use `examples/smoke_test.yaml`
   up and down, final stage at the operating pressure.
 - The rendered deck was **executed in LAMMPS on the real BTMA-PS membrane**
   (`runs/ex_cpu/dry/min.data`, 5183 atoms): all 21 stages ran, no errors, no
-  dangerous neighbour builds. Volume collapsed monotonically under the ramp.
+  dangerous neighbour builds.
+- **The scheme does what it is supposed to do.** Run at 10% of the published
+  stage durations (136 000 steps, ~40 min on one CPU core) on that membrane, the
+  cell went 0.200 -> peak **1.405** g/cm3 at 50 000 atm -> **1.017** g/cm3 after
+  staged decompression, and the production window was flat (drift within its own
+  uncertainty). The old single-squeeze scheme plateaued at **0.947** and was
+  still climbing. That is +7% density from the same starting structure at 10% of
+  the intended schedule length; the full-length run should land closer to the
+  1.10-1.25 experimental band. **The full-length schedule has not yet been run
+  — that is the next thing to do, and on the GPU machine rather than here.**
 - The gate was checked against four regimes — stable at target (passes), stable
   at the wrong density (fails on density), genuine slow densification (fails on
   drift), and pure noise (does not fail) — plus the real still-densifying trace
