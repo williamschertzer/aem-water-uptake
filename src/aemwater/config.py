@@ -15,14 +15,31 @@ from typing import Any, Mapping
 
 import yaml
 
+from .fep.schedule import DEFAULT_COUL_LAMBDAS, DEFAULT_LJ_LAMBDAS
 from .utils import LOG
 
 SUPPORTED_COUNTERIONS = ("Cl-", "Br-", "OH-", "HCO3-")
 SUPPORTED_WATER_MODELS = ("spce", "tip3p")
 
+#: Estimators available for the excess chemical potential. ``"fep"`` is the
+#: alchemical ghost-particle path (default); ``"widom"`` is test-particle
+#: insertion, kept as an independent cross-check.
+SUPPORTED_MU_EX_METHODS = ("fep", "widom")
+
 
 class ConfigError(ValueError):
     """Raised when a configuration is internally inconsistent."""
+
+
+def _is_tuple_field(annotation: Any) -> bool:
+    """Whether a dataclass field annotation denotes a tuple.
+
+    ``from __future__ import annotations`` is in force, so annotations reach us as
+    strings rather than as types; matching on the text is the honest way to read
+    them without importing ``typing.get_type_hints`` machinery that would have to
+    resolve every name in the module.
+    """
+    return isinstance(annotation, str) and annotation.lstrip().startswith("tuple")
 
 
 def _check(condition: bool, message: str) -> None:
@@ -354,6 +371,146 @@ class WidomSpec:
 
 
 @dataclass(frozen=True)
+class FEPSpec:
+    """Alchemical FEP settings for the excess chemical potential of water.
+
+    Replaces Widom insertion as the default estimator. Widom is biased toward
+    zero in a dense medium because its Boltzmann average is carried by rare
+    cavity-landing trials; the ghost-particle path here has no rare event in it.
+
+    Defaults are sized for a production membrane run on a cluster. The bulk
+    validation and the smoke test override the sampling lengths downward; see
+    ``examples/`` and ``docs/fep_design.md``.
+    """
+
+    #: Independently equilibrated polymer morphologies to average over. The
+    #: between-morphology spread usually dominates the total uncertainty in a
+    #: glassy matrix, so this is the knob that actually buys precision -- more
+    #: sampling within one badly-chosen morphology does not. 1 is permitted for
+    #: bulk water (where there is only one liquid) and for smoke tests.
+    n_morphologies: int = 3
+
+    #: Soft-core LJ ladder (leg 1), charges off. Must span exactly 0 -> 1.
+    #: Clustered near zero because a soft-core dU/dlambda peaks there. Defined in
+    #: :mod:`aemwater.fep.schedule` so the ladder has one definition rather than
+    #: two that agree by coincidence.
+    lj_lambdas: tuple[float, ...] = DEFAULT_LJ_LAMBDAS
+    #: Charge ladder (leg 2), LJ core fully present. Must span exactly 0 -> 1.
+    coul_lambdas: tuple[float, ...] = DEFAULT_COUL_LAMBDAS
+
+    #: Soft-core exponent ``n`` and the two alpha parameters, passed straight to
+    #: the pair style. The published Beutler defaults; changing them changes the
+    #: path but not the endpoints, so results remain comparable in principle --
+    #: but only if bulk and membrane use the same values, which is enforced.
+    soft_core_n: int = 1
+    alpha_lj: float = 0.5
+    alpha_coul: float = 10.0
+
+    #: PPPM accuracy for FEP runs, overriding ``md.kspace_accuracy``.
+    #:
+    #: Measured, not guessed. The charge-leg dU on a fixed configuration of 195
+    #: SPC/E waters carries a PPPM grid error of ~0.016 kcal/mol per state at the
+    #: workflow default of 1e-4 -- and the same absolute error appears in a dilute
+    #: cell, so it is grid resolution rather than anything physical. Accumulated
+    #: over a 6-interval charge ladder with a consistent sign that is ~0.1
+    #: kcal/mol against a 0.30 kcal/mol error budget, and no amount of sampling
+    #: removes it. At 1e-6 the error falls below 2e-4 kcal/mol for an 11% cost
+    #: increase. Ordinary MD does not need this because forces converge much
+    #: faster than these energy *differences* do.
+    kspace_accuracy: float = 1.0e-6
+
+    #: Equilibration discarded at each lambda before sampling begins, steps.
+    equil_steps: int = 50_000
+    #: Production sampling per lambda, steps.
+    production_steps: int = 500_000
+    #: Interval between stored frames. With the defaults this gives 500 frames
+    #: per state, which is ample after decorrelation.
+    sample_every: int = 1_000
+
+    #: Estimators to evaluate. All three run on the same data at negligible extra
+    #: cost, and their disagreement is the most useful diagnostic available: MBAR
+    #: and BAR differing by more than their error bars means poor overlap, and TI
+    #: differing from both means the ladder is too coarse to integrate.
+    estimators: tuple[str, ...] = ("mbar", "bar", "ti")
+    #: Central-difference half-width for the TI dU/dlambda estimate.
+    ti_delta: float = 0.01
+
+    #: Build the full K x N energy matrix with a rerun pass over stored frames.
+    #: Required by MBAR; BAR and TI can run without it from inline compute fep
+    #: output alone.
+    rerun_matrix: bool = True
+    #: Keep per-lambda trajectories after the rerun pass. They are the only way
+    #: to rebuild the matrix with a different ladder, but they are large.
+    keep_trajectories: bool = False
+
+    #: Add the analytic long-range LJ correction. ``compute fep`` refuses
+    #: ``tail yes`` for soft styles while the production templates run
+    #: ``pair_modify tail yes``, so the term is computed in post. It largely
+    #: cancels in the membrane-minus-bulk difference but is kept for absolute
+    #: numbers.
+    tail_correction: bool = True
+
+    #: Minimum nearest-neighbour overlap in the MBAR overlap matrix below which
+    #: the ladder is reported as inadequate rather than silently trusted.
+    min_overlap: float = 0.03
+    #: Refuse to report a result whose statistical error exceeds this, kcal/mol.
+    max_stderr: float = 0.30
+
+    seed: int = 90210
+
+    def validate(self) -> None:
+        _check(self.n_morphologies >= 1, "fep.n_morphologies must be >= 1")
+        for name, lams in (("lj_lambdas", self.lj_lambdas),
+                           ("coul_lambdas", self.coul_lambdas)):
+            _check(len(lams) >= 2, f"fep.{name} needs at least 2 states")
+            _check(
+                all(b > a for a, b in zip(lams, lams[1:])),
+                f"fep.{name} must be strictly increasing (got {list(lams)})",
+            )
+            _check(
+                lams[0] == 0.0 and lams[-1] == 1.0,
+                f"fep.{name} must span exactly 0 -> 1 (got {lams[0]} -> {lams[-1]}); "
+                "the endpoints are the physical states, so a truncated ladder "
+                "silently computes a different free energy",
+            )
+        _check(self.soft_core_n >= 1, "fep.soft_core_n must be >= 1")
+        _check(
+            0 < self.kspace_accuracy <= 1.0e-5,
+            "fep.kspace_accuracy must be in (0, 1e-5]; looser grids put a "
+            "systematic error of order 0.01 kcal/mol per lambda state into the "
+            "charge leg that sampling cannot remove (see FEPSpec docstring)",
+        )
+        _check(self.alpha_lj > 0, "fep.alpha_lj must be positive")
+        _check(self.alpha_coul > 0, "fep.alpha_coul must be positive")
+        _check(self.equil_steps >= 0, "fep.equil_steps must be non-negative")
+        _check(self.production_steps > 0, "fep.production_steps must be positive")
+        _check(self.sample_every >= 1, "fep.sample_every must be >= 1")
+        _check(
+            self.production_steps >= self.sample_every,
+            "fep.production_steps must be >= fep.sample_every, else no frames are stored",
+        )
+        n_frames = self.production_steps // self.sample_every
+        _check(
+            n_frames >= 20,
+            f"fep.production_steps / fep.sample_every gives {n_frames} frames per "
+            "lambda; MBAR needs at least ~20 after decorrelation to return a "
+            "meaningful uncertainty",
+        )
+        _check(bool(self.estimators), "fep.estimators must not be empty")
+        unknown = set(self.estimators) - {"mbar", "bar", "ti"}
+        _check(not unknown, f"unknown fep.estimators: {sorted(unknown)}")
+        if "mbar" in self.estimators:
+            _check(
+                self.rerun_matrix,
+                "fep.estimators includes 'mbar' but fep.rerun_matrix is false; "
+                "MBAR needs the full K x N energy matrix that the rerun pass builds",
+            )
+        _check(0 < self.ti_delta < 0.5, "fep.ti_delta must be in (0, 0.5)")
+        _check(0 <= self.min_overlap < 1, "fep.min_overlap must be in [0, 1)")
+        _check(self.max_stderr > 0, "fep.max_stderr must be positive")
+
+
+@dataclass(frozen=True)
 class RunConfig:
     """Complete description of one water-uptake calculation."""
 
@@ -363,16 +520,33 @@ class RunConfig:
     equilibration: EquilibrationSpec = field(default_factory=EquilibrationSpec)
     insertion: InsertionSpec = field(default_factory=InsertionSpec)
     widom: WidomSpec = field(default_factory=WidomSpec)
+    fep: FEPSpec = field(default_factory=FEPSpec)
     water_model: str = "spce"
     workdir: str = "runs/aem"
+    #: Which estimator supplies mu_ex for the saturation criterion. ``"fep"``
+    #: (default) uses the alchemical path; ``"widom"`` keeps the original test-
+    #: particle route. Both remain available -- Widom is retained as an
+    #: independent cross-check, not as dead code -- but only the selected one
+    #: decides where uptake stops.
+    mu_ex_method: str = "fep"
 
     def __post_init__(self) -> None:
         self.validate()
 
     def validate(self) -> None:
         for sub in (self.polymer, self.box, self.md, self.equilibration,
-                    self.insertion, self.widom):
+                    self.insertion, self.widom, self.fep):
             sub.validate()
+        _check(
+            self.mu_ex_method in SUPPORTED_MU_EX_METHODS,
+            f"mu_ex_method must be one of {SUPPORTED_MU_EX_METHODS} "
+            f"(got {self.mu_ex_method!r})",
+        )
+        if self.mu_ex_method == "widom" and not self.widom.enabled:
+            raise ConfigError(
+                "mu_ex_method is 'widom' but widom.enabled is false; there would "
+                "be no estimator to decide saturation"
+            )
         _check(
             self.equilibration.high_temperature > self.md.temperature,
             "equilibration.high_temperature must exceed md.temperature; the "
@@ -386,10 +560,15 @@ class RunConfig:
             self.water_model in SUPPORTED_WATER_MODELS,
             f"water_model must be one of {SUPPORTED_WATER_MODELS} (got {self.water_model!r})",
         )
-        if self.widom.enabled and self.md.relax_npt_steps == 0:
+        # Applies to whichever estimator is in use: both evaluate mu_ex on the
+        # configuration handed to them, so an unrelaxed cell biases either one.
+        if self.md.relax_npt_steps == 0 and (
+            self.widom.enabled or self.mu_ex_method == "fep"
+        ):
             LOG.warning(
-                "md.relax_npt_steps is 0: Widom mu_ex will be evaluated on an unrelaxed "
-                "configuration and the saturation point will be biased."
+                "md.relax_npt_steps is 0: %s mu_ex will be evaluated on an "
+                "unrelaxed configuration and the saturation point will be biased.",
+                self.mu_ex_method.upper(),
             )
 
     # ------------------------------------------------------------------ I/O --
@@ -432,6 +611,7 @@ class RunConfig:
             "equilibration": EquilibrationSpec,
             "insertion": InsertionSpec,
             "widom": WidomSpec,
+            "fep": FEPSpec,
         }
         kwargs: dict[str, Any] = {}
         for name, cls in section_types.items():
@@ -449,8 +629,18 @@ class RunConfig:
                 raise ConfigError(
                     f"unknown key(s) in section '{name}': {sorted(unknown)}; valid keys: {sorted(known)}"
                 )
-            kwargs[name] = cls(**raw)
-        top_known = {"water_model", "workdir"}
+            # YAML has no tuple type, so a tuple-typed field round-trips as a
+            # list. Coerce it back: these dataclasses are frozen (hence hashable
+            # and safely shareable), and a list field would break both that and
+            # equality against a freshly constructed config.
+            section = dict(raw)
+            for f in fields(cls):
+                if f.name in section and _is_tuple_field(f.type):
+                    value = section[f.name]
+                    if isinstance(value, (list, tuple)):
+                        section[f.name] = tuple(value)
+            kwargs[name] = cls(**section)
+        top_known = {"water_model", "workdir", "mu_ex_method"}
         unknown_top = set(data) - top_known
         if unknown_top:
             raise ConfigError(f"unknown top-level key(s): {sorted(unknown_top)}; valid: {sorted(top_known)}")

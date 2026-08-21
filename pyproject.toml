@@ -24,6 +24,9 @@ dependencies = [
   "jinja2>=3.1",
   "pandas>=2.0",
   "matplotlib>=3.7",
+  # FEP estimators. v4 renamed the BAR entry point to lowercase `pymbar.bar` and
+  # returns a dict rather than a tuple, so v5 is not assumed compatible.
+  "pymbar>=4.0,<5",
 ]
 
 [project.optional-dependencies]

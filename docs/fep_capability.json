@@ -1,0 +1,51 @@
+{
+  "lammps_binary": "/Users/william/.claude-science/conda/envs/aemmd/bin/lmp",
+  "lammps_version": "Large-scale Atomic/Molecular Massively Parallel Simulator - 22 Jul 2025 - Update 5",
+  "pair_styles": {
+    "lj/cut/soft": true,
+    "lj/cut/coul/long/soft": true,
+    "lj/cut/coul/cut/soft": true,
+    "coul/long/soft": true,
+    "coul/cut/soft": true
+  },
+  "compute_fep": true,
+  "fix_adapt_fep": true,
+  "fix_adapt": true,
+  "fix_widom": true,
+  "pymbar_version": "4.2.0",
+  "pymbar_api": {
+    "bar": "pymbar.bar(w_F, w_R) -> {'Delta_f','dDelta_f'}  (lowercase in v4)",
+    "mbar": "MBAR(u_kn, N_k).compute_free_energy_differences() -> {'Delta_f','dDelta_f'}",
+    "overlap": "MBAR.compute_overlap()",
+    "decorrelate": "timeseries.statistical_inefficiency / subsample_correlated_data"
+  },
+  "syntax_notes": {
+    "compute_fep_requires_v_variable": "numeric literal rejected (compute_fep.cpp:97)",
+    "tail_yes_rejected_for_soft_styles": "analytic tail correction must be added in post",
+    "molecule_file_needs_leading_comment_line": true,
+    "lambda1_reduces_to_standard": {
+      "std_pe": 132.8493946,
+      "soft_pe": 132.8492943,
+      "rel_diff": 7.549902678587811e-07
+    }
+  },
+  "verified_on_runner_binary": {
+    "binary": "/Users/william/.claude-science/conda/envs/aemmd/bin/lmp",
+    "version": "22 Jul 2025 - Update 5",
+    "lambda1_equivalence": {
+      "std_pe": 136.8804821,
+      "soft_pe": 136.8804498,
+      "rel_diff": 2.35972283930628e-07
+    },
+    "fep_syntax_accepted": [
+      "compute fep pair ... lambda i*j k*l v_dlam volume yes",
+      "compute fep atom charge <type> v_dq",
+      "fix adapt/fep 0 pair ... lambda i*j k*l v_lam scale yes"
+    ],
+    "tail_yes": "REJECTED (compute_fep.cpp:240) -> analytic correction in post"
+  },
+  "also_verified_homebrew": {
+    "version": "23 Jun 2022",
+    "rel_diff": 7.5e-07
+  }
+}

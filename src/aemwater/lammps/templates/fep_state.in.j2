@@ -1,0 +1,92 @@
+{% include "fep_common.in.j2" %}
+
+{# One fixed-lambda simulation. Both legs use this file: the leg-specific part is
+   the set of `compute fep` perturbation clauses, which the driver builds in
+   Python (aemwater.fep.inputs) because leg 1 perturbs a pair lambda while leg 2
+   perturbs two atom charges by different amounts.
+
+   SHAKE is applied to water including the ghost -- they share bond and angle
+   types, so one command covers both, and constraining them identically is what
+   makes the coupled endpoint equal to a real water. This is safe here even
+   though it is NOT safe under `fix widom`: SHAKE builds its cluster list once at
+   setup, and `fix widom` invalidates it by inserting and deleting atoms on every
+   trial, whereas the ghost is a permanent atom. Verified over the whole ladder
+   (lambda_lj = 0, 0.05, 0.1, 0.5, 1.0 and lambda_q = 0, 0.5, 1.0): zero SHAKE
+   determinant warnings, zero lost atoms, temperature stable at 298 K. #}
+{% if constraints.shake_command -%}
+{{ constraints.shake_command }}
+{% endif %}
+
+timestep        {{ md.timestep }}
+velocity        all create {{ md.temperature }} {{ seed }} mom yes rot yes dist gaussian
+
+# ------------------------------------------------------------ equilibration ----
+# NVT at fixed volume: the cell was already relaxed under NPT before the ghost
+# was added, and letting the volume respond to a partly-coupled phantom molecule
+# would make each lambda state a slightly different physical system. The ghost is
+# one molecule in ~200, so its effect on the true equilibrium volume is far below
+# the run-to-run spread; a per-state volume would not be.
+fix             integrate all nvt temp {{ md.temperature }} {{ md.temperature }} {{ md.tdamp }}
+{% if fep.equil_steps > 0 -%}
+run             {{ fep.equil_steps }}
+{% endif %}
+reset_timestep  0
+
+# --------------------------------------------------------------- production ----
+{% for p in perturbations -%}
+# {{ p.comment }}
+{{ p.compute_command }}
+{% endfor %}
+{% for p in perturbations -%}
+variable        {{ p.name }} equal c_{{ p.compute_id }}[1]
+{% endfor %}
+
+# One row per stored frame, matching the dump interval exactly so the dU samples
+# and the trajectory frames refer to the same configurations. `ave/time` with
+# Nrepeat = 1 stores instantaneous values rather than a running mean: BAR and
+# MBAR need the distribution of dU, and a pre-averaged dU would destroy it
+# (exp(-beta<dU>) is not <exp(-beta dU)>).
+#
+# The column header is `title2`, NOT `title3`. In scalar mode ave/time writes two
+# header lines and title2 is the second; title3 only applies to the vector mode
+# that writes a third. Setting title3 here is silently ignored -- LAMMPS emits its
+# own default header instead, with `v_` prefixed names, and read_fep_columns then
+# cannot find `dU_ti_plus`.
+fix             fepout all ave/time {{ fep.sample_every }} 1 {{ fep.sample_every }} &
+                {% for p in perturbations %}v_{{ p.name }} {% endfor %}&
+                file {{ fep_file }} format " %.14g" title1 "# fixed-lambda FEP: {{ leg }} leg, lambda_lj={{ "%.6g"|format(lambda_lj) }}, lambda_q={{ "%.6g"|format(lambda_q) }}" &
+                title2 "# step {% for p in perturbations %}{{ p.name }} {% endfor %}"
+
+# Potential energy of THIS state on each stored frame. The rerun pass recomputes
+# every other state's energy on these same frames; this column is the diagonal of
+# the K x N matrix and is what the rerun output is checked against.
+#
+# `format " %.14g"` is required, not cosmetic. The default %g gives 6 significant
+# figures, which on a PE of -1545.39 kcal/mol quantises the last digit at 0.01 --
+# two orders of magnitude larger than the 1e-4 diagonal tolerance, so the rerun
+# check would fail on formatting alone. The leading space keeps columns separated.
+variable        pe_total equal pe
+fix             peout all ave/time {{ fep.sample_every }} 1 {{ fep.sample_every }} v_pe_total &
+                file {{ pe_file }} format " %.14g" title1 "# potential energy of the sampled state" &
+                title3 "# step pe"
+
+{% if fep.rerun_matrix -%}
+# Unwrapped coordinates and the box, written for the rerun pass. Image flags are
+# not enough on their own: `rerun` re-derives neighbour lists, so it needs
+# positions consistent with the box it is given.
+#
+# `format float %.16e` matters for the same reason as above. The default 6-digit
+# coordinates put ~3e-2 kcal/mol of quantisation error into every re-evaluated
+# energy -- enough to fail the diagonal check, and enough to bias dU by more than
+# the PPPM error this ladder is already tightened to avoid. Full precision costs
+# only file size, which `fep.keep_trajectories` already governs.
+dump            traj all custom {{ fep.sample_every }} {{ traj_file }} id type xu yu zu
+dump_modify     traj sort id pbc yes format float %.16e
+{% endif -%}
+
+run             {{ fep.production_steps }}
+
+{% if write_state -%}
+write_data      {{ out_data }}
+{% endif -%}
+print           "FEP_STATE_DONE {{ leg }} {{ "%.6g"|format(lambda_lj) }} {{ "%.6g"|format(lambda_q) }}"

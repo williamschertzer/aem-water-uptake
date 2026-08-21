@@ -6,7 +6,10 @@ dependencies:
   - python=3.11
   - rdkit>=2024.03        # verified 2026.03.1
   - ambertools>=23        # antechamber / parmchk2 / tleap / sander; GAFF2 2.2.20
-  - lammps>=2023.08       # must provide MC (fix widom, fix gcmc), RIGID, KSPACE, MOLECULE
+  - lammps>=2023.08       # must provide MC (fix widom, fix gcmc), RIGID, KSPACE, MOLECULE, FEP
+  # FEP estimators. v4 renamed the BAR entry point to lowercase `pymbar.bar` and
+  # made it return a dict, so the major version is pinned explicitly.
+  - pymbar>=4.0,<5        # verified 4.2.0
   - parmed>=4.0           # verified 4.3.1
   - mdanalysis>=2.7       # verified 2.10.0
   - openmpi

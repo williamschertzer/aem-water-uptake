@@ -288,8 +288,23 @@ def _rounded_charges(structure: pmd.Structure, decimals: int = 6) -> list[float]
     return rounded
 
 
-def write_data_file(system: LammpsSystem, path: Path, title: str = "") -> Path:
-    """Write ``system`` as a LAMMPS ``atom_style full`` data file."""
+def write_data_file(
+    system: LammpsSystem,
+    path: Path,
+    title: str = "",
+    include_pair_coeffs: bool = True,
+) -> Path:
+    """Write ``system`` as a LAMMPS ``atom_style full`` data file.
+
+    ``include_pair_coeffs=False`` omits the ``Pair Coeffs`` section. Needed by
+    the alchemical FEP path: ``read_data`` parses that section against whatever
+    ``pair_style`` is active, and the soft-core styles take a third coefficient
+    (lambda) that the two-column section cannot express -- LAMMPS reports
+    ``Incorrect args for pair coefficients`` and stops. The FEP inputs emit every
+    ``pair_coeff`` line explicitly anyway, so the section would be redundant even
+    if it parsed; leaving it out makes the input file the single source of truth
+    for the coupling.
+    """
     struct = system.structure
     path = Path(path)
     box = struct.box
@@ -341,11 +356,12 @@ def write_data_file(system: LammpsSystem, path: Path, title: str = "") -> Path:
         out.append(f"{tid} {mass:.6f}  # {name}")
     out.append("")
 
-    out.append("Pair Coeffs # lj/cut/coul/long")
-    out.append("")
-    for tid, eps, sigma, name in system.pair_coeffs():
-        out.append(f"{tid} {eps:.8f} {sigma:.8f}  # {name}")
-    out.append("")
+    if include_pair_coeffs:
+        out.append("Pair Coeffs # lj/cut/coul/long")
+        out.append("")
+        for tid, eps, sigma, name in system.pair_coeffs():
+            out.append(f"{tid} {eps:.8f} {sigma:.8f}  # {name}")
+        out.append("")
 
     if struct.bonds:
         out.append("Bond Coeffs # harmonic")
