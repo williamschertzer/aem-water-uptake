@@ -473,19 +473,36 @@ _REFERENCE_CRITICAL = (
     "insertions_per_call",
 )
 
+#: For FEP, ``insertions_per_call`` is dropped. It is reference-critical for
+#: Widom because it sets how far up the tail of the cavity distribution the
+#: estimate has climbed -- i.e. it changes the bias, and the saturation
+#: criterion is a difference of two comparably-biased numbers. FEP has no such
+#: dependence: the parameter does not enter an alchemical calculation at all, so
+#: requiring it to match would reject a perfectly valid reference.
+_REFERENCE_CRITICAL_FEP = (
+    "water_model", "temperature", "cutoff",
+)
 
-def _check_reference_matches(reference, wanted) -> None:
+
+def _check_reference_matches(reference, wanted, method: str = "widom") -> None:
     """Refuse a bulk reference computed at different settings.
 
-    The saturation criterion is a difference of two Widom estimates and is only
+    The saturation criterion is a difference of two mu_ex estimates and is only
     meaningful because their biases are comparable (see the module docstring).
     Comparing against a reference run at a different water model or cutoff
     silently produces a number that looks like an uptake and is not one.
+
+    ``kspace_accuracy`` is checked for Widom but not for FEP: the FEP path
+    deliberately overrides it with the tighter ``fep.kspace_accuracy`` (the
+    charge-leg dU carries a PPPM grid error that ordinary MD never sees), so the
+    value in ``BulkSettings`` is not the one that was used.
     """
+    critical = (_REFERENCE_CRITICAL_FEP if method == "fep"
+                else _REFERENCE_CRITICAL)
     mismatched = [
         f"{name}: reference {getattr(reference.settings, name)!r} "
         f"!= run {getattr(wanted, name)!r}"
-        for name in _REFERENCE_CRITICAL
+        for name in critical
         if getattr(reference.settings, name) != getattr(wanted, name)
     ]
     if mismatched:
@@ -517,7 +534,7 @@ def run_uptake(
     import time
 
     from .assembly import CellContents, assemble, ion_molecules, water_molecules
-    from .bulk import BulkSettings, run_bulk_reference
+    from .bulk import BulkSettings, run_bulk_reference, run_bulk_reference_fep
     from .chemistry import composition_from_config
     from .insertion import insert_waters
     from .lammps.inputs import (
@@ -553,12 +570,20 @@ def run_uptake(
         seed=config.widom.seed,
     )
     if bulk_reference is None:
-        LOG.info("no bulk reference supplied; computing one")
-        bulk_reference = run_bulk_reference(
-            bulk_settings, workdir / "bulk", cache_dir=config.widom.cache_dir,
-            ranks=config.md.mpi_ranks
-        )
-    _check_reference_matches(bulk_reference, bulk_settings)
+        LOG.info("no bulk reference supplied; computing one by %s",
+                 config.mu_ex_method.upper())
+        if config.mu_ex_method == "fep":
+            bulk_reference = run_bulk_reference_fep(
+                config, bulk_settings, workdir / "bulk",
+                cache_dir=config.widom.cache_dir, ranks=config.md.mpi_ranks,
+            )
+        else:
+            bulk_reference = run_bulk_reference(
+                bulk_settings, workdir / "bulk",
+                cache_dir=config.widom.cache_dir, ranks=config.md.mpi_ranks,
+            )
+    _check_reference_matches(bulk_reference, bulk_settings,
+                            method=getattr(bulk_reference, "method", "widom"))
     for issue in bulk_reference.sanity():
         LOG.warning("bulk reference: %s", issue)
 

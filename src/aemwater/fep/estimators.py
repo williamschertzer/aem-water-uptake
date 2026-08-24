@@ -405,9 +405,15 @@ def combine_legs(legs: Sequence[LegResult]) -> tuple[float, float]:
     """Total dG and its uncertainty across the legs.
 
     The legs are sequential stages of one thermodynamic path, so their free
-    energies add and their errors add in quadrature. Sign convention: the result
-    is the free energy of *introducing* the water, so mu_ex is its negation --
-    handled by the caller, not here, so this stays a pure sum.
+    energies add and their errors add in quadrature.
+
+    Sign convention: both ladders run lambda = 0 -> 1 in the direction of
+    *growth* (see ``DEFAULT_LJ_LAMBDAS``), i.e. from a fully decoupled ghost to a
+    fully interacting water. The sum is therefore the free energy of introducing
+    the water, which *is* the excess chemical potential -- no negation. An
+    earlier version of this docstring claimed mu_ex was the negation of this sum,
+    which would have reported bulk SPC/E water at +8 kcal/mol instead of -8: the
+    sign that says water does not condense.
     """
     total = sum(l.reported.delta_f for l in legs)
     err = float(np.sqrt(sum(l.reported.stderr ** 2 for l in legs)))

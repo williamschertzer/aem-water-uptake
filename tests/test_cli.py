@@ -118,6 +118,10 @@ def test_run_help_lists_expert_bulk_override(capsys):
 _KNOWN_BINDINGS = {
     "comp": "aemwater.chemistry:SystemComposition",
     "estimate": "aemwater.widom:WidomEstimate",
+    # The FEP path deliberately uses a distinct variable name so this table can
+    # bind one type per name. Both estimators flow into the same BulkReference,
+    # so a typo on either is invisible until the expensive job reaches that line.
+    "fep_estimate": "aemwater.fep.campaign:FEPEstimate",
     "ref": "aemwater.bulk:BulkReference",
     "structure": "aemwater.analysis:HydrationStructure",
     "system": "aemwater.lammps.writer:LammpsSystem",

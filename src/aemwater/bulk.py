@@ -70,6 +70,10 @@ class BulkReference:
     density: float
     volume: float
     workdir: Path
+    #: Which estimator produced ``mu_ex``: ``"widom"`` or ``"fep"``. This is not
+    #: bookkeeping -- it changes how a discrepancy against the literature should
+    #: be read, so ``sanity()`` branches on it.
+    method: str = "widom"
 
     def sanity(self) -> list[str]:
         """Warnings about a reference that disagrees with known behaviour.
@@ -81,16 +85,33 @@ class BulkReference:
         model = self.settings.water_model.lower()
         ref_mu = LITERATURE_MU_EX.get(model)
         if ref_mu is not None and abs(self.mu_ex.mu_ex - ref_mu) > 1.5:
-            issues.append(
-                f"mu_ex = {self.mu_ex.mu_ex:.2f} kcal/mol differs from the "
-                f"published {model} value ({ref_mu:.1f}) by more than 1.5 "
-                f"kcal/mol. This is expected at affordable insertion counts: "
-                f"direct Widom sampling underestimates the magnitude until the "
-                f"tail of the cavity distribution is sampled. The saturation "
-                f"criterion uses the difference against an equally "
-                f"under-converged membrane estimate, so it does not invalidate "
-                f"the run -- but this number is not a measurement of mu_ex."
-            )
+            if self.method == "fep":
+                # For FEP the excuse below does not apply: a converged
+                # alchemical calculation on a validated water model should
+                # reproduce the published mu_ex to a few tenths. A 1.5 kcal/mol
+                # gap points at the protocol -- ladder resolution, an
+                # unconverged endpoint, or a finite-size/tail-correction
+                # omission -- not at slow sampling of a rare event.
+                issues.append(
+                    f"mu_ex = {self.mu_ex.mu_ex:.2f} kcal/mol differs from the "
+                    f"published {model} value ({ref_mu:.1f}) by more than 1.5 "
+                    f"kcal/mol. Unlike Widom insertion, FEP has no built-in "
+                    f"reason to be biased low here: check the lambda ladder for "
+                    f"overlap gaps (the BAR/MBAR spread reports this), that "
+                    f"both endpoints are converged, and the finite-size "
+                    f"treatment. Treat this reference as suspect."
+                )
+            else:
+                issues.append(
+                    f"mu_ex = {self.mu_ex.mu_ex:.2f} kcal/mol differs from the "
+                    f"published {model} value ({ref_mu:.1f}) by more than 1.5 "
+                    f"kcal/mol. This is expected at affordable insertion counts: "
+                    f"direct Widom sampling underestimates the magnitude until the "
+                    f"tail of the cavity distribution is sampled. The saturation "
+                    f"criterion uses the difference against an equally "
+                    f"under-converged membrane estimate, so it does not invalidate "
+                    f"the run -- but this number is not a measurement of mu_ex."
+                )
         ref_rho = LITERATURE_DENSITY.get(model)
         if ref_rho is not None and abs(self.density - ref_rho) > 0.05:
             issues.append(
@@ -98,10 +119,21 @@ class BulkReference:
                 f"{model} value ({ref_rho:.3f}) by more than 0.05"
             )
         if not self.mu_ex.converged:
-            issues.append(
-                f"Widom average is carried by only {self.mu_ex.effective_samples:.1f} "
-                "effective samples"
-            )
+            # The two estimators fail convergence for different reasons and
+            # report different diagnostics, so the message has to come from the
+            # estimate itself rather than assume Widom's effective_samples.
+            if hasattr(self.mu_ex, "limiting_factor"):
+                issues.append(
+                    f"FEP estimate is not converged: stderr "
+                    f"{self.mu_ex.stderr:.3f} kcal/mol over "
+                    f"{self.mu_ex.n_morphologies} morphologies; limiting "
+                    f"factor is {self.mu_ex.limiting_factor}"
+                )
+            else:
+                issues.append(
+                    f"Widom average is carried by only "
+                    f"{self.mu_ex.effective_samples:.1f} effective samples"
+                )
         return issues
 
     def summary(self) -> dict[str, object]:
@@ -169,6 +201,118 @@ def build_bulk_coordinates(
     geometries = water_orientations(n_waters, water_model, rng)
     coords = (geometries + sites[:, None, :]).reshape(-1, 3)
     return np.mod(coords, edge), edge
+
+
+def run_bulk_reference_fep(
+    config,
+    settings: BulkSettings,
+    workdir: Path | str,
+    cache_dir: Path | str | None = None,
+    ranks: int = 1,
+) -> BulkReference:
+    """Bulk reference measured by alchemical FEP instead of Widom insertion.
+
+    Returns the same :class:`BulkReference` the Widom path returns, so the driver
+    consumes either without branching, with ``method="fep"`` recorded on it --
+    which is what makes ``sanity()`` read a literature discrepancy as a protocol
+    fault rather than as expected Widom bias.
+
+    Cached under ``bulkfep_<key>.json`` with a key that includes the lambda
+    ladders and sampling lengths (see
+    :func:`aemwater.fep.campaign.fep_cache_key`). Both the filename prefix and
+    the key differ from the Widom path's: sharing either would let a cached
+    Widom number satisfy an FEP request at the same state point.
+    """
+    from .fep.campaign import (
+        FEPEstimate,
+        MorphologyEstimate,
+        fep_cache_key,
+        run_bulk_campaign,
+        write_campaign_report,
+    )
+
+    workdir = Path(workdir)
+    workdir.mkdir(parents=True, exist_ok=True)
+    cache = Path(cache_dir) if cache_dir else workdir.parent / "bulk_cache"
+    cache.mkdir(parents=True, exist_ok=True)
+    cache_file = cache / f"bulkfep_{fep_cache_key(settings, config.fep)}.json"
+
+    if cache_file.exists():
+        LOG.info("bulk FEP reference: reusing cached result %s", cache_file.name)
+        payload = json.loads(cache_file.read_text())
+        est = FEPEstimate(
+            mu_ex=payload["mu_ex"],
+            stderr=payload["stderr"],
+            temperature=settings.temperature,
+            n_morphologies=payload["n_morphologies"],
+            per_morphology=[
+                MorphologyEstimate(index=row["morphology"],
+                                   mu_ex=row["mu_ex_kcal_mol"],
+                                   stderr=row["stderr_kcal_mol"])
+                for row in payload.get("per_morphology", [])
+            ],
+            var_between=payload.get("var_between", 0.0),
+            var_within=payload.get("var_within", 0.0),
+            between_unmeasured=payload.get("between_unmeasured", False),
+            max_stderr=config.fep.max_stderr,
+        )
+        return BulkReference(settings, est, payload["density"],
+                             payload["volume"], workdir, method="fep")
+
+    # Named `fep_estimate` rather than `estimate`: tests/test_cli.py binds the
+    # name `estimate` to WidomEstimate when auditing this module for attributes
+    # that do not exist on their type. Reusing the name for an FEPEstimate would
+    # either break that guard or force it to be weakened, and the guard has
+    # already caught three real typos.
+    fep_estimate = run_bulk_campaign(
+        config, workdir, n_waters=settings.n_waters, ranks=ranks,
+    )
+    write_campaign_report(fep_estimate, workdir / "fep_bulk.json")
+
+    density, volume = _fep_cell_density(settings)
+
+    cache_file.write_text(json.dumps({
+        "mu_ex": fep_estimate.mu_ex,
+        "stderr": fep_estimate.stderr,
+        "n_morphologies": fep_estimate.n_morphologies,
+        "var_between": fep_estimate.var_between,
+        "var_within": fep_estimate.var_within,
+        "between_unmeasured": fep_estimate.between_unmeasured,
+        "per_morphology": [m.summary() for m in fep_estimate.per_morphology],
+        "density": density,
+        "volume": volume,
+    }, indent=2, default=float))
+    LOG.info("bulk FEP reference: mu_ex = %.3f +/- %.3f kcal/mol (%d morphologies)",
+             fep_estimate.mu_ex, fep_estimate.stderr,
+             fep_estimate.n_morphologies)
+    return BulkReference(settings, fep_estimate, density, volume, workdir,
+                         method="fep")
+
+
+#: Target density of the FEP cells, g/cm3. The alchemical states run NVT in a box
+#: built to this density, so it is the cell's density by construction.
+FEP_CELL_DENSITY = 0.997
+
+
+def _fep_cell_density(settings: BulkSettings) -> tuple[float, float]:
+    """Density and volume of the FEP cells.
+
+    Not a measurement, and deliberately not dressed up as one. The fixed-lambda
+    states run NVT (``fix nvt`` in ``fep_state.in.j2``) in a box sized by
+    :func:`build_bulk_coordinates` at :data:`FEP_CELL_DENSITY`, so the volume is
+    an input and averaging the thermo output would only return the number that
+    was put in. An earlier version of this function globbed for ``density.dat``
+    under the state directories and averaged the second half "discarding the
+    lattice melt", which was doubly wrong: the FEP template writes no such file,
+    so it always fell through to the nominal value anyway.
+
+    Consequence worth stating: unlike the Widom path -- whose bulk stage runs NPT
+    and *measures* the density, giving a check on the water model -- the FEP path
+    provides no such check. Validate the density with the Widom bulk stage, or an
+    ordinary NPT run, if it matters.
+    """
+    edge = water_box_edge(settings.n_waters, FEP_CELL_DENSITY)
+    return FEP_CELL_DENSITY, edge ** 3
 
 
 def run_bulk_reference(

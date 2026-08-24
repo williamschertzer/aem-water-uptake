@@ -356,6 +356,78 @@ exposes `usable` / `pairs_without_uncertainty` so the orchestrator can gate on i
 without re-deriving why. Left alone the `nan` propagates silently into the
 reported total.
 
+## Bulk SPC/E validation
+
+The calculation that tests the whole chain: SPC/E has a published
+mu_ex near -6.5 kcal/mol, so a result that misses it indicts the
+protocol rather than the sample.
+
+Two independently seeded morphologies, 100 waters, 8 LJ + 5 charge
+states, 6k production steps per state (a deliberately cheap run --
+9 minutes on a laptop, 4 ranks):
+
+| | LJ leg | charge leg | mu_ex |
+|---|---|---|---|
+| morphology 0 | +2.513 | -9.308 | -6.795 +/- 0.517 |
+| morphology 1 | +2.955 | -9.810 | -6.855 +/- 0.619 |
+| combined | | | **-6.825**, 95% CI [-7.206, -6.444] |
+
+The published -6.5 lies inside the interval. For comparison, direct
+Widom insertion on the same water model gives -2.74 +/- 0.64 (README),
+wrong by 3.8 kcal/mol -- so the alchemical path removes the dominant
+error of the previous method, which was the point of building it.
+
+The leg decomposition is physically sensible on its own terms: forming
+the cavity costs about +2.7 kcal/mol and charging the inserted water in
+it gains about -9.6.
+
+This run reports `converged = False`, correctly: at two morphologies
+the interval half-width is 0.38 against a 0.30 budget. It is a
+validation, not a production number.
+
+### What this run does *not* establish
+
+* The between-morphology variance is unmeasured at M=2 in any useful
+  sense -- one degree of freedom. The `var_between` reported is 0
+  after clamping, which means "not resolved", not "zero".
+* Density is not validated by the FEP path at all. The fixed-lambda
+  states run NVT in a box built to a target density, so the volume is
+  an input (see `_fep_cell_density`). Use the Widom bulk stage or an
+  ordinary NPT run to check the water model's density.
+* Ladder adequacy was checked only through estimator agreement at this
+  resolution, not by refining the ladder and confirming the answer is
+  unchanged.
+
+### Two statistics defects this run exposed
+
+Both were found because the run produced a number that could be
+checked against a known answer, and neither was visible in the unit
+tests as originally written.
+
+**Convergence was tested on the wrong quantity.** The run reported
+`converged = True` with `stderr = 0.030` against a 0.30 budget, while
+its 95% interval spanned +/-0.38 -- wider than the budget it claimed to
+meet. The gap is the t-quantile, 12.7 at one degree of freedom.
+`FEPEstimate.converged` now tests the interval half-width, which is
+what a reader means by "known to 0.3 kcal/mol".
+
+**A variance floor was tried and rejected.** The two morphologies
+landed 0.06 kcal/mol apart while each carried a 0.5-0.6 kcal/mol
+internal error, so `sqrt(v_obs/M)` came out 13x below the sampling
+noise measured inside those same cells. Flooring the total variance at
+`v_within` looked obviously right. Monte Carlo against a known truth in
+exactly that regime (sigma_between 0.05, sigma_within 0.55) refuted it:
+the unfloored interval covers at 0.949 / 0.943 / 0.944 for M = 2, 3, 5
+-- nominal -- while the floored version covers at 1.000. The
+t-quantile already compensates for a variance estimate that came out
+small by luck, and flooring the variance breaks that cancellation. The
+lesson recorded in the code: the small `v_obs` was a signal about
+which *interval* to trust, not about the variance being wrong.
+
+The unit tests had covered only the between-dominated regime, which is
+why they passed throughout. A within-dominated coverage test now runs
+alongside them.
+
 ## Estimator implementation notes
 
 All three run on the same data, which is what makes their agreement meaningful.

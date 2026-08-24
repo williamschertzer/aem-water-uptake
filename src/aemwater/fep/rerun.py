@@ -247,12 +247,23 @@ def build_energy_matrix(
     ghost: GhostTopology,
     config,
     workdir: Path,
+    data_file: str | Path | None = None,
     lammps_args: Sequence[str] = (),
 ) -> EnergyMatrix:
     """Run the rerun pass for one leg and assemble ``u_kn``.
 
     ``state_dirs[j]`` must be the directory the sampling run for ``ladder.states[j]``
     wrote, holding ``traj.lammpstrj`` and ``pe.dat``.
+
+    ``data_file`` is the topology every rerun reads; it defaults to
+    ``state_dirs[j]/state.data`` for the layout where each state carries its own
+    copy. Only topology, types and box are taken from it -- coordinates come from
+    the trajectory and the ghost's charges are set explicitly per state by
+    :func:`_charge_commands` -- so a single shared file is equally valid and is
+    what :func:`aemwater.fep.campaign.run_leg` passes. Passing it explicitly
+    rather than deriving a filename means a layout change cannot silently point
+    the rerun at a topology that differs from the one sampled; the diagonal check
+    below would catch that, but only after paying for the whole pass.
     """
     states = ladder.states
     if len(state_dirs) != len(states) or len(systems) != len(states):
@@ -277,7 +288,8 @@ def build_energy_matrix(
             system=system,
             ghost=ghost,
             config=config,
-            data_file=str((sdir / "state.data").resolve()),
+            data_file=str(Path(data_file).resolve()) if data_file is not None
+            else str((sdir / "state.data").resolve()),
             traj_file=str((sdir / "traj.lammpstrj").resolve()),
             out_file=out,
             sample_every=config.fep.sample_every,
