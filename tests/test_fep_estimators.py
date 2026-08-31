@@ -169,8 +169,8 @@ def test_central_difference_beats_one_sided():
     noise = rng.normal(0, 1e-9, 500)
     plus = 2 * delta + delta**2 + noise
     minus = -2 * delta + delta**2 + noise
-    central, _ = dudl_from_finite_differences(plus, minus, delta)
-    one_sided, _ = dudl_from_finite_differences(plus, None, delta)
+    central = dudl_from_finite_differences(plus, minus, delta).mean
+    one_sided = dudl_from_finite_differences(plus, None, delta).mean
     assert abs(central - 2.0) < abs(one_sided - 2.0)
     assert central == pytest.approx(2.0, abs=1e-6)
 
@@ -178,7 +178,7 @@ def test_central_difference_beats_one_sided():
 def test_one_sided_reverse_difference_has_the_right_sign():
     delta = 0.05
     minus = np.full(100, -0.5)          # dU going down in lambda
-    val, _ = dudl_from_finite_differences(None, minus, delta)
+    val = dudl_from_finite_differences(None, minus, delta).mean
     assert val == pytest.approx(0.5 / delta)
 
 

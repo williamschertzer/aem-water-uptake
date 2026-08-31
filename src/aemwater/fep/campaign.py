@@ -498,13 +498,32 @@ def select_reported(
         chosen = best
 
     est = estimates[chosen]
+
+    # Carry forward the diagnostics only the *unreported* estimators measured.
+    # The reported estimate is the only one kept past this point, and the two
+    # estimators measure complementary things: MBAR records per-pair overlap,
+    # TI records the per-state dU/dlambda mean and fluctuation. Dropping the
+    # loser's keys would discard measurements that cost the whole leg to make
+    # and cannot be recovered without re-running it. Existing keys always win,
+    # so the reported estimator's own numbers are never overwritten.
+    carried: dict = {}
+    for name in ("ti", "mbar", "bar"):
+        other = estimates.get(name)
+        if other is None or name == chosen:
+            continue
+        for key in ("lambdas", "dudl_mean", "dudl_sd", "neighbour_overlap"):
+            if key in other.diagnostics and key not in est.diagnostics:
+                carried[key] = other.diagnostics[key]
+
+    extra: dict = dict(carried)
     if chosen != preferred:
-        est = replace(est, diagnostics={
-            **est.diagnostics,
-            "selection": f"reported instead of {preferred}: "
-                         f"{preferred} stderr {estimates[preferred].stderr:.3f} "
-                         f"vs {est.stderr:.3f}",
-        })
+        extra["selection"] = (
+            f"reported instead of {preferred}: "
+            f"{preferred} stderr {estimates[preferred].stderr:.3f} "
+            f"vs {est.stderr:.3f}"
+        )
+    if extra:
+        est = replace(est, diagnostics={**est.diagnostics, **extra})
     return est
 
 

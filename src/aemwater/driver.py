@@ -70,7 +70,7 @@ from __future__ import annotations
 
 import json
 import shutil
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 import numpy as np
@@ -353,6 +353,34 @@ def _write_state(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload, indent=2, default=str))
 
 
+def _membrane_mu_ex_fep(config, stage: Path, contents, coords, edge, step: int):
+    """mu_ex of water in the relaxed cell, by FEP on that one cell.
+
+    One cell, not ``fep.n_morphologies`` of them. The between-morphology term
+    for the reported answer comes from replicating the whole uptake loop
+    (``aemwater campaign``), because M ghost insertions into a single
+    trajectory's cell share that cell's packing entirely and would report
+    sampling noise as structural heterogeneity -- see docs/fep_design.md,
+    "Uptake averaged over morphologies". So the per-iteration spec is forced to
+    one morphology here; anything else would double-count replication and make
+    ``run_membrane_campaign`` refuse the single cell it is given.
+    """
+    from .assembly import assemble
+    from .fep.campaign import run_membrane_campaign, write_campaign_report
+
+    spec = replace(config.fep.at_screening_resolution(), n_morphologies=1)
+    cell = assemble(contents, coords, edge=edge,
+                    water_model_name=config.water_model)
+    estimate = run_membrane_campaign(
+        replace(config, fep=spec), stage / "fep", systems=[cell],
+        ranks=config.md.mpi_ranks,
+    )
+    write_campaign_report(estimate, stage / "fep_membrane.json")
+    LOG.info("iteration %d: membrane mu_ex = %.3f +/- %.3f kcal/mol (FEP)",
+             step, estimate.mu_ex, estimate.stderr)
+    return estimate
+
+
 def _run_iteration(
     config, stage: Path, coords, elements, edge, insertion_result, comp,
     n_waters: int, model, bulk_reference, step: int, typed_chains: list,
@@ -414,15 +442,21 @@ def _run_iteration(
     n_averages = max(1, config.md.relax_npt_steps // (md.thermo_every * 10))
     n_widom_samples = max(1, config.widom.steps_per_block // config.widom.every)
 
+    # Under FEP the insertion block's output is never read, so paying for it
+    # would add the whole Widom sampling run to every iteration for nothing.
+    # The template keys still up: `enabled` false drops the fix and the run.
+    widom_spec = (replace(config.widom, enabled=False)
+                  if config.mu_ex_method == "fep" else config.widom)
+
     render_input(
         "insert.in.j2", stage / "in.insert",
-        md=md, widom=config.widom, title=f"iteration {step}",
+        md=md, widom=widom_spec, title=f"iteration {step}",
         data_file="start.data", pair_coeff_lines=pair_coeff_lines(system),
         extra_types=None, comm_cutoff=comm_cutoff(md),
         minim=minimise_spec(md), soft=soft_push_spec(md),
         constraints=constraint_spec(
             md, system.water_bond_type(), system.water_angle_type(),
-            has_widom=config.widom.enabled),
+            has_widom=widom_spec.enabled),
         groups=GroupSpec(n_polymer_molecules=n_poly, n_ion_molecules=n_ion,
                          water_type_o=o_type, water_type_h=h_type),
         out_data="relaxed.data", out_restart="relaxed.restart",
@@ -449,11 +483,25 @@ def _run_iteration(
     half = arr[len(arr) // 2:]
     density, volume = float(half[:, 1].mean()), float(half[:, 2].mean())
 
-    est = read_widom_file(stage / "mu.dat", md.temperature,
-                          n_blocks=config.widom.n_blocks)
+    # The membrane estimator must match the one that produced the reference.
+    # The saturation test is a difference, and for Widom it is only meaningful
+    # because both halves carry the same insertion bias (module docstring). A
+    # converged FEP reference against an under-converged Widom membrane number
+    # differs by that bias -- several kcal/mol -- and would report saturation
+    # many waters early while looking entirely plausible.
+    new_coords, new_elements, new_edge = _read_final_state(stage / "relaxed.data")
+    if config.mu_ex_method == "fep":
+        # The relaxed configuration and box, not the freshly-inserted ones:
+        # mu_ex is a property of the equilibrated ensemble, and `all_coords`
+        # still carries the insertion geometry that the NPT stage just relaxed
+        # (and `edge` its pre-relaxation box, which NPT has since changed).
+        est = _membrane_mu_ex_fep(config, stage, contents, new_coords,
+                                  new_edge, step)
+    else:
+        est = read_widom_file(stage / "mu.dat", md.temperature,
+                              n_blocks=config.widom.n_blocks)
     test = SaturationTest(est, bulk_reference.mu_ex,
                           tolerance_sigma=config.widom.sigma_tolerance)
-    new_coords, new_elements, new_edge = _read_final_state(stage / "relaxed.data")
     return {
         "coords": new_coords, "elements": new_elements, "edge": new_edge,
         "density": density, "volume": volume, "mu_ex": est.mu_ex,

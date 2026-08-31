@@ -273,6 +273,12 @@ def run_bulk_reference_fep(
         config, workdir, n_waters=settings.n_waters, ranks=ranks,
     )
     write_campaign_report(fep_estimate, workdir / "fep_bulk.json")
+    # Figures next to the numbers. Threshold forwarded so the drawn acceptance
+    # line is the one this run screened against, not the module default.
+    from .fep.diagnostics import write_campaign_figures
+
+    write_campaign_figures(fep_estimate, workdir,
+                           min_overlap=config.fep.min_overlap)
 
     density, volume = _fep_cell_density(settings)
 

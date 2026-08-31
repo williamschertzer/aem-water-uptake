@@ -483,7 +483,10 @@ class FEPSpec:
 
         Use :meth:`FEPSpec` unchanged for the final answer. The intended pattern
         is screening at every iteration and one production campaign at the
-        saturation point, which is what :mod:`aemwater.driver` does.
+        saturation point. ``aemwater.driver`` applies this preset per iteration
+        (with ``n_morphologies`` forced to 1, since the loop measures the single
+        cell it is carrying); ``aemwater.uptake_campaign`` replicates the loop to
+        get the between-morphology spread.
 
         The ladders are placed at equal thermodynamic length from the bulk
         SPC/E validation run's measured fluctuation profile; see

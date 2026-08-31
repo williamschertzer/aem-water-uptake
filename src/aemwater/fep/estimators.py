@@ -21,8 +21,8 @@ state's own dU trace before doing anything else.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Mapping, Sequence
+from dataclasses import dataclass, field, replace
+from typing import Mapping, NamedTuple, Sequence
 
 import numpy as np
 
@@ -128,6 +128,10 @@ def mbar_estimate(matrix: EnergyMatrix, *, subsample: bool = True) -> LegEstimat
         stderr=ddf,
         n_effective=float(N_k.sum()),
         diagnostics={
+            # The ladder is recorded because `neighbour_overlap` is otherwise
+            # unattributable: a value below threshold says a pair is too thin,
+            # but not *which* pair, and that is the actionable part.
+            "lambdas": [float(x) for x in matrix.lambdas],
             "N_k": N_k.tolist(),
             "statistical_inefficiency": [round(g, 2) for g in gs],
             "neighbour_overlap": [round(o, 4) for o in neighbours],
@@ -324,9 +328,22 @@ def read_fep_columns(path) -> dict[str, np.ndarray]:
     return {n: data[:, i] for i, n in enumerate(names)}
 
 
+class DudlPoint(NamedTuple):
+    """One state's dU/dlambda: its mean, the error on that mean, and its sd.
+
+    Named rather than a bare tuple because ``stderr`` and ``sd`` are easy to
+    swap at a call site and the consequences differ: ``stderr`` propagates into
+    the TI error bar, ``sd`` decides where states belong on the ladder.
+    """
+
+    mean: float
+    stderr: float
+    sd: float
+
+
 def dudl_from_finite_differences(
     plus: np.ndarray | None, minus: np.ndarray | None, delta: float
-) -> tuple[float, float]:
+) -> DudlPoint:
     """dU/dlambda from a state's TI columns.
 
     ``plus`` and ``minus`` are the per-frame dU to lambda +/- delta. A central
@@ -358,7 +375,15 @@ def dudl_from_finite_differences(
         raise ValueError("need at least one of plus/minus to form a derivative")
     idx, _ = _subsample(series)
     kept = series[idx]
-    return float(kept.mean()), float(kept.std(ddof=1) / np.sqrt(kept.size))
+    sd = float(kept.std(ddof=1))
+    # sd is returned as well as the standard error because it is a different
+    # diagnostic, not a scaled copy: neighbouring-state overlap is governed by
+    # the *fluctuation* of dU/dlambda, which is what places the ladder (see
+    # fep.schedule), while the stderr only says how well this state's mean is
+    # known. Reconstructing one from the other needs the retained sample count,
+    # which is dropped here, so a caller that wants the fluctuation cannot
+    # recover it downstream.
+    return DudlPoint(float(kept.mean()), sd / np.sqrt(kept.size), sd)
 
 
 def ti_from_state_dirs(
@@ -369,15 +394,21 @@ def ti_from_state_dirs(
     leg: FEPLeg,
 ) -> LegEstimate:
     """TI over a ladder, reading each state's finite-difference columns."""
-    means, errs = [], []
+    means, errs, sds = [], [], []
     for path in fep_files:
         cols = read_fep_columns(path)
-        m, e = dudl_from_finite_differences(
+        point = dudl_from_finite_differences(
             cols.get("dU_ti_plus"), cols.get("dU_ti_minus"), delta
         )
-        means.append(m)
-        errs.append(e)
-    return ti_estimate(lambdas, means, errs, leg=leg)
+        means.append(point.mean)
+        errs.append(point.stderr)
+        sds.append(point.sd)
+    est = ti_estimate(lambdas, means, errs, leg=leg)
+    # The per-state fluctuation is carried forward for the diagnostic figures
+    # and for any future ladder re-placement: it is measured here and nowhere
+    # else, and re-running the states to recover it would cost the whole leg.
+    return replace(est, diagnostics={**est.diagnostics,
+                                     "dudl_sd": [round(s, 4) for s in sds]})
 
 
 @dataclass(frozen=True)
