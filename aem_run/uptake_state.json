@@ -1,0 +1,45 @@
+{
+  "iterations": [
+    {
+      "index": 0,
+      "n_waters_before": 0,
+      "n_requested": 50,
+      "n_inserted": 50,
+      "n_waters_after": 50,
+      "density": 1.0993125000000001,
+      "volume": 16186.4875,
+      "lambda_value": 1.0,
+      "water_uptake_pct": 9.177567246349783,
+      "mu_ex": -14.82116450420717,
+      "mu_ex_stderr": 1.6120399364812168,
+      "mu_gap": -8.621164504207169,
+      "saturated": false,
+      "geometrically_saturated": false,
+      "free_volume_fraction": 0.07691548378180957,
+      "wall_seconds": 34768.50678348541
+    },
+    {
+      "index": 1,
+      "n_waters_before": 50,
+      "n_requested": 25,
+      "n_inserted": 25,
+      "n_waters_after": 75,
+      "density": 1.15764875,
+      "volume": 16016.5125,
+      "lambda_value": 1.5,
+      "water_uptake_pct": 13.766350869524674,
+      "mu_ex": -11.850457791276295,
+      "mu_ex_stderr": 1.4570377417922802,
+      "mu_gap": -5.6504577912762946,
+      "saturated": false,
+      "geometrically_saturated": false,
+      "free_volume_fraction": 0.014411782125441731,
+      "wall_seconds": 36711.43719410896
+    }
+  ],
+  "n_waters": 75,
+  "mu_gap": -5.6504577912762946,
+  "stderr": 1.4570377417922802,
+  "failed_batches": 0,
+  "next_step": 2
+}
