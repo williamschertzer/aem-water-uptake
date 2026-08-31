@@ -15,7 +15,12 @@ from typing import Any, Mapping
 
 import yaml
 
-from .fep.schedule import DEFAULT_COUL_LAMBDAS, DEFAULT_LJ_LAMBDAS
+from .fep.schedule import (
+    DEFAULT_COUL_LAMBDAS,
+    DEFAULT_LJ_LAMBDAS,
+    SCREENING_COUL_LAMBDAS,
+    SCREENING_LJ_LAMBDAS,
+)
 from .utils import LOG
 
 SUPPORTED_COUNTERIONS = ("Cl-", "Br-", "OH-", "HCO3-")
@@ -391,9 +396,9 @@ class FEPSpec:
     n_morphologies: int = 3
 
     #: Soft-core LJ ladder (leg 1), charges off. Must span exactly 0 -> 1.
-    #: Clustered near zero because a soft-core dU/dlambda peaks there. Defined in
-    #: :mod:`aemwater.fep.schedule` so the ladder has one definition rather than
-    #: two that agree by coincidence.
+    #: Denser at low lambda because a soft-core dU/dlambda is largest there.
+    #: Defined in :mod:`aemwater.fep.schedule` so the ladder has one definition
+    #: rather than two that agree by coincidence.
     lj_lambdas: tuple[float, ...] = DEFAULT_LJ_LAMBDAS
     #: Charge ladder (leg 2), LJ core fully present. Must span exactly 0 -> 1.
     coul_lambdas: tuple[float, ...] = DEFAULT_COUL_LAMBDAS
@@ -457,6 +462,45 @@ class FEPSpec:
     max_stderr: float = 0.30
 
     seed: int = 90210
+
+    def at_screening_resolution(self) -> "FEPSpec":
+        """A cheaper copy for the uptake loop's per-iteration mu_ex.
+
+        The loop needs mu_ex at every water content to find saturation, and the
+        location of saturation is decided by where two curves cross, not by the
+        third decimal of either. This trades 6.4x in cost for roughly a factor
+        of 2 in error bar:
+
+        ==================  ===========  ===========
+        quantity            production   screening
+        ==================  ===========  ===========
+        states (LJ+charge)  12 + 7       7 + 7
+        production steps    500k         150k
+        equil steps         50k          25k
+        morphologies        3            2
+        relative cost       1.0          0.156
+        ==================  ===========  ===========
+
+        Use :meth:`FEPSpec` unchanged for the final answer. The intended pattern
+        is screening at every iteration and one production campaign at the
+        saturation point, which is what :mod:`aemwater.driver` does.
+
+        The ladders are placed at equal thermodynamic length from the bulk
+        SPC/E validation run's measured fluctuation profile; see
+        :mod:`aemwater.fep.schedule` for why that metric and not equal work.
+        """
+        return replace(
+            self,
+            lj_lambdas=SCREENING_LJ_LAMBDAS,
+            coul_lambdas=SCREENING_COUL_LAMBDAS,
+            production_steps=150_000,
+            equil_steps=25_000,
+            n_morphologies=min(self.n_morphologies, 2),
+            # The screening error bar is ~2x the production one by construction,
+            # so holding it to the production precision budget would mark every
+            # screening point unconverged and the loop would never advance.
+            max_stderr=max(self.max_stderr, 0.60),
+        )
 
     def validate(self) -> None:
         _check(self.n_morphologies >= 1, "fep.n_morphologies must be >= 1")

@@ -533,6 +533,99 @@ cell buys nothing and the honest response is more cells. The pooled estimate is 
 mean over morphologies with the standard error over morphologies, and the report
 states which term dominates rather than quoting a single number.
 
+## Screening vs production resolution
+
+The uptake loop needs mu_ex at every water content to locate saturation, but
+saturation is the water content where two curves cross, and a crossing is
+insensitive to the third decimal of either curve. `FEPSpec.at_screening_resolution()`
+therefore trades precision for throughput:
+
+| | production | screening |
+|---|---|---|
+| lambda states (LJ + charge) | 12 + 7 | 7 + 7 |
+| production steps per state | 500k | 150k |
+| equilibration steps per state | 50k | 25k |
+| morphologies | 3 | 2 |
+| relative cost | 1.0 | 0.156 |
+
+6.4x cheaper for roughly 2x the error bar. The preset also relaxes `max_stderr`
+to 0.60 kcal/mol: the screening error bar is about twice production's *by
+construction*, so inheriting the production precision budget unchanged would
+mark every screening point unconverged and the loop would never advance.
+
+Only the sampling is reduced. The soft-core parameters, PPPM accuracy and the
+alchemical path itself are identical, because changing them would change the
+Hamiltonian and a screening number would no longer be an approximation of the
+production number it stands in for. There is a test for this.
+
+### Ladder placement: thermodynamic length, not equal work
+
+The screening ladders are not a naive subset of the production ladder. They are
+placed at equal *thermodynamic length* — equal integral of sd(dU/dlambda) —
+using the fluctuation profile measured in the bulk SPC/E validation run. Two
+simpler criteria were tried and rejected against that measurement:
+
+* **Equal lambda spacing** leaves the LJ leg's high-fluctuation region near
+  lambda 0.35 under-resolved while spending states where nothing happens.
+* **Equal work** (equal integral of the mean dU/dlambda) starves lambda
+  0.35–0.65 on the LJ leg, where the *mean* is small but the *fluctuation* is
+  still large. Overlap between neighbouring states depends on the fluctuation,
+  not the mean, so equal work puts states in the wrong place.
+
+A gap cap on top of equal work was also tried and abandoned: it adds states
+where there is no work to resolve, and pushed the count to 17 against
+production's 19, defeating the purpose.
+
+The measured profile is pinned in `tests/test_fep_schedule.py`, so any future
+change to these ladders has to be argued against the same measurement rather
+than a remembered one.
+
+## Uptake averaged over morphologies
+
+`aemwater campaign` runs the entire uptake loop once per morphology —
+independent packing seed, independent dry equilibration, independent hydration
+trajectory — and averages the saturation points.
+
+**Why the loop is replicated and not just the mu_ex inside it.** The cheaper
+design is one hydration trajectory with an M-morphology FEP campaign at each
+water content. It does not work: the between-morphology variance requires cells
+that are independent *as cells*, and M ghost insertions into one trajectory's
+cell share that cell's packing entirely. They would measure sampling noise and
+report it as structural heterogeneity — worse than not measuring it, because the
+error bar would look respectable while resting on a single packing.
+
+Replicating the loop costs M times the wall clock and buys a between-morphology
+error bar on the quantity actually reported, plus a diagnostic no single
+trajectory can provide: if two morphologies saturate at different water
+contents, that spread *is* the uncertainty of the prediction. Screening
+resolution is what makes this affordable — M=2 or 3 screening trajectories cost
+less than one production-resolution trajectory.
+
+The bulk reference is computed once and shared across trajectories. It is a
+property of the water model and state point, not of the packing, so computing it
+per morphology would spend M times the CPU on M estimates of the same number and
+— worse — would let the trajectories be judged against slightly different
+reference values, injecting reference noise into the spread that is supposed to
+measure packing.
+
+### What counts as usable
+
+A trajectory that stopped at `max_iterations` never reached saturation, so its
+water content is a lower bound rather than a measurement. Averaging it in would
+bias the campaign low with no indication in the error bar, so those trajectories
+are excluded and the exclusion is reported. `geometric_saturation` *is* a real
+endpoint and counts as usable. A morphology that crashed is recorded with its
+exception text and excluded, rather than discarding the trajectories that
+succeeded.
+
+With one usable morphology the campaign reports `stderr = nan` and an infinite
+interval, not `0.0`. Zero would read as an extraordinarily precise measurement
+when in fact no spread was measured at all.
+
+The interval uses the Student-t quantile on M-1 degrees of freedom, for the same
+reason as the mu_ex campaign; Monte Carlo confirms nominal coverage at M = 2, 3
+and 5, and that the normal quantile covers under 75% at M = 2.
+
 ## Fallback if the FEP package is absent
 
 Not needed for this machine — `lj/cut/soft`, `lj/cut/coul/long/soft`,

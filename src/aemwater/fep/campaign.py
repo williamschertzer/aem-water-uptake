@@ -657,6 +657,114 @@ def run_bulk_campaign(
     )
 
 
+def run_membrane_campaign(
+    config,
+    workdir: Path | str,
+    systems: Sequence,
+    ranks: int = 1,
+    lammps_args: Sequence[str] = (),
+) -> FEPEstimate:
+    """Measure mu_ex of water inside the membrane by FEP over morphologies.
+
+    ``systems`` are already-equilibrated hydrated membrane cells, one per
+    morphology -- typically the relaxed cells the driver carries in memory at a
+    given water content. Unlike :func:`run_bulk_campaign`, this function does
+    *not* build or equilibrate anything: a polymer morphology takes far longer
+    to equilibrate than the FEP itself, so the cells are the caller's
+    responsibility and their independence is the caller's guarantee.
+
+    ``spec.n_morphologies`` is therefore a *check* here rather than a loop
+    bound. Silently averaging over fewer cells than configured would report an
+    error bar whose between-morphology term rests on less replication than the
+    config claims, which is the specific failure this framework exists to
+    avoid.
+    """
+    from ..lammps.inputs import GroupSpec, comm_cutoff, constraint_spec
+    from .ghost import add_ghost_water
+    from .schedule import LambdaLadder
+
+    workdir = Path(workdir)
+    workdir.mkdir(parents=True, exist_ok=True)
+    spec = config.fep
+
+    if not systems:
+        raise CampaignError(
+            "run_membrane_campaign got no cells. The caller must supply at "
+            "least one equilibrated morphology; this function does not build "
+            "them."
+        )
+    if len(systems) < spec.n_morphologies:
+        raise CampaignError(
+            f"fep.n_morphologies is {spec.n_morphologies} but only "
+            f"{len(systems)} equilibrated cell(s) were supplied. Averaging "
+            "over fewer cells than configured would report a between-morphology "
+            "error bar that rests on less replication than the config claims. "
+            "Either equilibrate more morphologies or lower fep.n_morphologies "
+            "so the number in the config is the number that ran."
+        )
+    if len(systems) > spec.n_morphologies:
+        LOG.info("membrane campaign: %d cells supplied, using the first %d "
+                 "per fep.n_morphologies", len(systems), spec.n_morphologies)
+    systems = list(systems)[:spec.n_morphologies]
+
+    from ..forcefield.water import water_model as get_water_model
+    model = get_water_model(config.water_model)
+
+    morphologies: list[MorphologyEstimate] = []
+    for index, cell in enumerate(systems):
+        seed = morphology_seed(spec.seed, index)
+        mdir = workdir / f"morph{index:02d}"
+        mdir.mkdir(parents=True, exist_ok=True)
+
+        # The ghost is added per morphology rather than once, because it takes
+        # new atom types and those depend on the cell's own type table.
+        system, ghost = add_ghost_water(cell, model=model, seed=seed)
+        o_type, h_type = system.water_atom_types()
+        # Counted off the *input* cell, before the ghost is added.
+        # ``n_polymer_molecules`` counts residues that are neither water nor
+        # ion, and the ghost has its own residue name (GHO), so counting the
+        # ghosted system reports one phantom chain and would put the ghost in
+        # the polymer group. Verified: a 30-water box reports 0 chains before
+        # add_ghost_water and 1 after.
+        #
+        # fep_state.in.j2 does not currently reference the group block at all,
+        # so this is latent rather than active -- which is exactly why it is
+        # worth getting right here instead of discovering it the first time a
+        # group-dependent fix is added to that template.
+        n_poly = cell.n_polymer_molecules()
+        n_ion = cell.n_ion_molecules()
+        shared = dict(
+            groups=GroupSpec(n_polymer_molecules=n_poly, n_ion_molecules=n_ion,
+                             water_type_o=o_type, water_type_h=h_type),
+            constraints=constraint_spec(config.md, system.water_bond_type(),
+                                        system.water_angle_type()),
+            comm_cutoff=comm_cutoff(config.md),
+        )
+
+        legs: dict[str, LegEstimate] = {}
+        for leg, lambdas in ((FEPLeg.LJ, spec.lj_lambdas),
+                             (FEPLeg.COUL, spec.coul_lambdas)):
+            result = run_leg(
+                leg, ladder=LambdaLadder(leg=leg, lambdas=lambdas),
+                system=system, ghost=ghost, config=config,
+                workdir=mdir / leg.value, seed=seed, ranks=ranks,
+                lammps_args=lammps_args, **shared,
+            )
+            legs[leg.value] = select_reported(result["estimates"])
+            for warning in estimator_disagreement(result["estimates"]):
+                LOG.warning("membrane morphology %d, %s leg: %s",
+                            index, leg.value, warning)
+
+        estimate = combine_legs_for_morphology(index, legs, workdir=mdir)
+        LOG.info("membrane morphology %d: mu_ex = %.3f +/- %.3f kcal/mol",
+                 index, estimate.mu_ex, estimate.stderr)
+        morphologies.append(estimate)
+
+    return combine_morphologies(
+        morphologies, config.md.temperature, max_stderr=spec.max_stderr,
+    )
+
+
 def write_campaign_report(estimate: FEPEstimate, path: Path | str) -> Path:
     """Serialise a campaign result to JSON, per-morphology rows included."""
     path = Path(path)
@@ -678,6 +786,7 @@ __all__ = [
     "estimator_disagreement",
     "morphology_seed",
     "run_leg",
+    "run_membrane_campaign",
     "select_reported",
     "t95",
     "write_campaign_report",

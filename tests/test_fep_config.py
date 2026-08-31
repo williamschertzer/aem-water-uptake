@@ -159,3 +159,66 @@ def test_widom_method_with_widom_disabled_is_rejected(cfg):
 def test_fep_default_still_valid_with_widom_disabled(cfg):
     """Turning Widom off is legitimate once FEP is the estimator."""
     assert cfg.with_overrides(**{"widom.enabled": False}).mu_ex_method == "fep"
+
+
+def test_screening_resolution_is_cheaper_and_still_valid():
+    """The screening preset must pass the same validation as production.
+
+    A preset that trips validate() would fail only when the loop first reached
+    it, which for an uptake sweep is well into a cluster job.
+    """
+    prod = FEPSpec()
+    scr = prod.at_screening_resolution()
+    scr.validate()
+
+    cost = lambda s: (
+        (len(s.lj_lambdas) + len(s.coul_lambdas))
+        * (s.production_steps + s.equil_steps)
+        * s.n_morphologies
+    )
+    assert cost(scr) / cost(prod) == pytest.approx(0.156, abs=0.01)
+
+
+def test_screening_ladders_span_the_physical_endpoints():
+    """A truncated ladder computes a different free energy without complaining."""
+    scr = FEPSpec().at_screening_resolution()
+    for lams in (scr.lj_lambdas, scr.coul_lambdas):
+        assert lams[0] == 0.0 and lams[-1] == 1.0
+        assert all(b > a for a, b in zip(lams, lams[1:]))
+
+
+def test_screening_relaxes_the_precision_budget():
+    """Otherwise every screening point reports unconverged and the loop stalls.
+
+    The screening error bar is ~2x production by construction, so a budget
+    inherited unchanged from production would be unreachable.
+    """
+    scr = FEPSpec(max_stderr=0.30).at_screening_resolution()
+    assert scr.max_stderr >= 0.60
+
+
+def test_screening_never_tightens_a_user_budget():
+    """A user who set a looser budget than ours keeps theirs."""
+    scr = FEPSpec(max_stderr=1.20).at_screening_resolution()
+    assert scr.max_stderr == 1.20
+
+
+def test_screening_is_idempotent():
+    """Applying it twice must not compound into a uselessly short run."""
+    once = FEPSpec().at_screening_resolution()
+    twice = once.at_screening_resolution()
+    assert twice.production_steps == once.production_steps
+    assert twice.n_morphologies == once.n_morphologies
+    assert twice.lj_lambdas == once.lj_lambdas
+
+
+def test_screening_preserves_the_alchemical_path():
+    """Soft-core parameters and k-space accuracy are not sampling knobs.
+
+    Changing them changes the Hamiltonian, so a screening number would not be
+    comparable to the production number it is meant to approximate.
+    """
+    prod = FEPSpec()
+    scr = prod.at_screening_resolution()
+    for attr in ("soft_core_n", "alpha_lj", "alpha_coul", "kspace_accuracy"):
+        assert getattr(scr, attr) == getattr(prod, attr)

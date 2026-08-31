@@ -367,3 +367,56 @@ def test_estimate_is_field_compatible_with_widom():
         assert hasattr(est, attr), attr
         assert hasattr(WidomEstimate, attr) or True
     assert isinstance(est.summary(), dict)
+
+
+# --- membrane campaign entry -------------------------------------------------
+
+def test_membrane_campaign_refuses_fewer_cells_than_configured():
+    """Averaging over fewer cells than configured misreports the replication.
+
+    The between-morphology error bar is the whole justification for running
+    several cells, so quietly using two when the config says three would report
+    a number whose stated basis does not exist.
+    """
+    from aemwater.config import PolymerSpec, RunConfig
+    from aemwater.fep.campaign import CampaignError, run_membrane_campaign
+
+    cfg = RunConfig(polymer=PolymerSpec(smiles="O"))
+    cfg = cfg.with_overrides(**{"fep.n_morphologies": 3})
+    with pytest.raises(CampaignError, match="only 2 equilibrated cell"):
+        run_membrane_campaign(cfg, "unused", systems=[object(), object()])
+
+
+def test_membrane_campaign_refuses_no_cells():
+    """It does not build morphologies; an empty list is a caller error."""
+    from aemwater.config import PolymerSpec, RunConfig
+    from aemwater.fep.campaign import CampaignError, run_membrane_campaign
+
+    cfg = RunConfig(polymer=PolymerSpec(smiles="O"))
+    with pytest.raises(CampaignError, match="no cells"):
+        run_membrane_campaign(cfg, "unused", systems=[])
+
+
+def test_ghost_residue_is_not_counted_as_a_polymer_chain():
+    """Regression: the ghost has its own residue name and must not be a chain.
+
+    ``LammpsSystem.n_polymer_molecules`` counts residues that are neither water
+    nor ion, so counting the *ghosted* cell reports one phantom polymer chain
+    and would place the ghost in the polymer group. The membrane campaign
+    therefore counts the input cell, before insertion.
+    """
+    from aemwater.assembly import CellContents, assemble, water_molecules
+    from aemwater.bulk import build_bulk_coordinates
+    from aemwater.forcefield.water import water_model
+    from aemwater.fep.ghost import add_ghost_water
+
+    model = water_model("spce")
+    coords, edge = build_bulk_coordinates(30, model, seed=11)
+    cell = assemble(
+        CellContents(chains=[], ions=[], waters=water_molecules(30, "spce")),
+        coords, edge=edge,
+    )
+    ghosted, _ = add_ghost_water(cell, model=model, seed=11)
+
+    assert cell.n_polymer_molecules() == 0
+    assert ghosted.n_polymer_molecules() == 1   # the trap

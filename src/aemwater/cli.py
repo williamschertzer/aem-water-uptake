@@ -120,6 +120,57 @@ def cmd_bulk(args) -> int:
     return 0
 
 
+def cmd_campaign(args) -> int:
+    """Run the uptake loop over several morphologies and average the endpoints.
+
+    Separate from ``run`` rather than a flag on it, because the two return
+    different things: ``run`` reports one packing's saturation point, this
+    reports a mean with a between-morphology error bar. Conflating them would
+    make the meaning of ``result.json`` depend on a flag.
+    """
+    from .uptake_campaign import UptakeCampaignError, run_uptake_campaign
+
+    config = _load_config(args)
+    workdir = args.workdir
+    bulk_mu = getattr(args, "bulk_mu_ex", None)
+    bulk_err = getattr(args, "bulk_stderr", None)
+    if (bulk_mu is None) != (bulk_err is None):
+        raise SystemExit("--bulk-mu-ex and --bulk-stderr must be supplied together")
+    if bulk_err is not None and bulk_err < 0:
+        raise SystemExit("--bulk-stderr must be non-negative")
+
+    bulk_reference = None
+    if bulk_mu is not None:
+        bulk_reference = _expert_bulk_reference(config, workdir, bulk_mu, bulk_err)
+        LOG.warning(
+            "EXPERT OVERRIDE: using user-specified bulk mu_ex = %.4f +/- %.4f "
+            "kcal/mol for every morphology; no bulk simulation will be run",
+            bulk_mu, bulk_err,
+        )
+
+    try:
+        campaign = run_uptake_campaign(
+            config, workdir,
+            n_morphologies=args.morphologies,
+            bulk_reference=bulk_reference,
+            resume=not args.force,
+            screening=not args.production_resolution,
+        )
+    except UptakeCampaignError as exc:
+        raise SystemExit(str(exc)) from exc
+
+    summary = campaign.summary()
+    (workdir / "campaign_result.json").write_text(json.dumps(summary, indent=2))
+    print(json.dumps(summary, indent=2))
+
+    if campaign.n_usable < 2:
+        print("\nWARNING: fewer than two usable morphologies, so the uptake "
+              "carries no uncertainty estimate. This is a single sample.",
+              file=sys.stderr)
+        return 2
+    return 0
+
+
 def cmd_run(args) -> int:
     from .driver import run_uptake
     from .prepare import prepare_dry_membrane
@@ -237,6 +288,26 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--bulk-stderr", type=float, metavar="KCAL_PER_MOL",
                    help="uncertainty for --bulk-mu-ex")
     p.set_defaults(func=cmd_run)
+
+    p = sub.add_parser(
+        "campaign",
+        help="uptake averaged over independently equilibrated morphologies")
+    _add_common(p); _add_polymer(p)
+    p.add_argument("--morphologies", type=int, default=None, metavar="M",
+                   help="independent packings to run (default: fep.n_morphologies). "
+                        "M=1 gives no error bar and is for smoke tests only")
+    p.add_argument("--production-resolution", action="store_true",
+                   help="run every iteration at full FEP resolution instead of "
+                        "the screening ladder; roughly 6.4x the cost per "
+                        "morphology")
+    p.add_argument("--force", action="store_true",
+                   help="rebuild every morphology and restart its loop")
+    p.add_argument("--bulk-mu-ex", type=float, metavar="KCAL_PER_MOL",
+                   help="expert override for bulk-water excess chemical potential; "
+                        "requires --bulk-stderr and bypasses the bulk simulation")
+    p.add_argument("--bulk-stderr", type=float, metavar="KCAL_PER_MOL",
+                   help="uncertainty for --bulk-mu-ex")
+    p.set_defaults(func=cmd_campaign)
 
     args = parser.parse_args(argv)
     logging.basicConfig(

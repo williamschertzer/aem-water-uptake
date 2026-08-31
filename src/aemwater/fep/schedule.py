@@ -21,11 +21,20 @@ class FEPLeg(str, Enum):
     COUL = "coul"
 
 
-#: Leg 1 -- soft-core LJ growth, charges off. Clustered near zero because a
-#: soft-core dU/dlambda peaks there: the core is still permeable, so the ghost
+#: Leg 1 -- soft-core LJ growth, charges off. Denser at low lambda, where a
+#: soft-core dU/dlambda is largest: the core is still permeable, so the ghost
 #: samples configurations whose energy changes fastest with lambda. An evenly
-#: spaced ladder wastes states at the top where nothing happens and starves the
-#: bottom where the variance lives.
+#: spaced ladder wastes states at the top where nothing happens.
+#:
+#: Measured on the bulk SPC/E validation run, <dU/dlambda> in kT peaks at
+#: lambda = 0.2 (+14.4, against +0.7 at lambda = 0) and its standard deviation
+#: peaks later still, at lambda = 0.35 (11.8 kT). So the busy region is the
+#: shoulder around 0.2-0.5, not the immediate neighbourhood of zero, and this
+#: ladder's two extra states at 0.05 and 0.1 buy less than the same two states
+#: would buy at 0.25 and 0.45. It is kept as the production default because it
+#: is the ladder the validation was run on and it is dense enough (12 states)
+#: that the misallocation costs CPU time rather than accuracy. See
+#: SCREENING_LJ_LAMBDAS for placement that follows the measurement.
 DEFAULT_LJ_LAMBDAS: tuple[float, ...] = (
     0.0, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0,
 )
@@ -34,6 +43,33 @@ DEFAULT_LJ_LAMBDAS: tuple[float, ...] = (
 #: suffice: U is quadratic in lambda_Q (the ghost's own periodic images through
 #: PPPM scale as lambda_Q^2), which is smooth and well covered by 7 points.
 DEFAULT_COUL_LAMBDAS: tuple[float, ...] = (0.0, 0.2, 0.4, 0.5, 0.6, 0.8, 1.0)
+
+#: Screening ladders: 7 states per leg instead of 12 + 7, for the uptake loop's
+#: per-iteration mu_ex where a 0.5 kcal/mol answer now beats a 0.1 kcal/mol
+#: answer after the run is over.
+#:
+#: Placed at equal *thermodynamic length* -- equal integral of
+#: sd(dU/dlambda) d(lambda) -- rather than equal lambda spacing or equal work.
+#: That is the criterion that equalises the variance each interval contributes
+#: to the free energy, and it is what makes a short ladder safe: the states go
+#: where the fluctuation is, so no single interval dominates the error.
+#:
+#: Two alternatives were tried on the validation run's measured profile and
+#: rejected. Equal lambda spacing starves the 0.2-0.5 shoulder on the LJ leg.
+#: Equal *work* (equal integral of |<dU/dlambda>|) clusters four of six states
+#: into lambda < 0.5 and then leaves a single 0.53-wide interval to the
+#: endpoint, because the work density collapses above 0.65 while the
+#: fluctuation does not: sd is still 4.5 kT at lambda = 0.65 where the mean is
+#: 1.0 kT. Thermodynamic length is the metric that sees this.
+#:
+#: The measured segment lengths are 0.87-0.94 kT (LJ) and 1.01-1.07 kT (charge),
+#: i.e. even to within 8%, with no interval wider than 0.32 in lambda.
+SCREENING_LJ_LAMBDAS: tuple[float, ...] = (
+    0.0, 0.23, 0.33, 0.41, 0.52, 0.68, 1.0,
+)
+SCREENING_COUL_LAMBDAS: tuple[float, ...] = (
+    0.0, 0.24, 0.43, 0.58, 0.73, 0.87, 1.0,
+)
 
 
 @dataclass(frozen=True)

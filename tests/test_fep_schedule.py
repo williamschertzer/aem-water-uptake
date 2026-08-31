@@ -12,6 +12,8 @@ import pytest
 from aemwater.fep.schedule import (
     DEFAULT_COUL_LAMBDAS,
     DEFAULT_LJ_LAMBDAS,
+    SCREENING_COUL_LAMBDAS,
+    SCREENING_LJ_LAMBDAS,
     FEPLeg,
     LambdaLadder,
     LambdaState,
@@ -149,3 +151,61 @@ def test_state_is_hashable_and_frozen():
     assert hash(state) is not None
     with pytest.raises(Exception):
         state.lam = 0.5
+
+
+#: sd(dU/dlambda) in kT at each production ladder point, measured on the bulk
+#: SPC/E validation run (two morphologies, averaged). This is the profile the
+#: screening ladders were placed against; pinning it here means a future change
+#: to those ladders has to be justified against the same measurement rather
+#: than against a remembered one.
+_MEASURED_LJ_SD = (
+    (0.0, 1.21), (0.10, 2.74), (0.20, 6.47), (0.35, 11.77),
+    (0.50, 7.55), (0.65, 4.48), (0.80, 3.19), (1.0, 1.31),
+)
+_MEASURED_COUL_SD = (
+    (0.0, 3.96), (0.25, 4.58), (0.50, 6.99), (0.75, 7.27), (1.0, 7.96),
+)
+
+
+def _segment_lengths(lambdas, profile):
+    """Thermodynamic length of each interval: integral of sd(dU/dlam) dlam."""
+    import numpy as np
+
+    xs = np.array([p[0] for p in profile])
+    ys = np.array([p[1] for p in profile])
+    grid = np.linspace(0.0, 1.0, 2001)
+    sd = np.interp(grid, xs, ys)
+    cumulative = np.concatenate(
+        [[0.0], np.cumsum((sd[1:] + sd[:-1]) / 2 * np.diff(grid))]
+    )
+    return np.diff(np.interp(np.array(lambdas), grid, cumulative))
+
+
+@pytest.mark.parametrize("lambdas,profile", [
+    (SCREENING_LJ_LAMBDAS, _MEASURED_LJ_SD),
+    (SCREENING_COUL_LAMBDAS, _MEASURED_COUL_SD),
+])
+def test_screening_ladders_have_even_thermodynamic_length(lambdas, profile):
+    """Every interval should contribute about equally to the total variance.
+
+    This is the property that makes a 7-state ladder safe: if one interval
+    carried most of the thermodynamic length, it would dominate the error and
+    the states spent elsewhere would be wasted. Equal lambda spacing and equal
+    work both fail this on the measured profile -- see the module docstring.
+    """
+    seg = _segment_lengths(lambdas, profile)
+    assert seg.max() / seg.min() < 1.25
+
+
+@pytest.mark.parametrize("lambdas,profile", [
+    (SCREENING_LJ_LAMBDAS, _MEASURED_LJ_SD),
+    (SCREENING_COUL_LAMBDAS, _MEASURED_COUL_SD),
+])
+def test_screening_beats_even_spacing_on_the_measured_profile(lambdas, profile):
+    """The placement has to earn its complexity against the obvious alternative."""
+    import numpy as np
+
+    even = tuple(np.linspace(0.0, 1.0, len(lambdas)))
+    ours = _segment_lengths(lambdas, profile)
+    naive = _segment_lengths(even, profile)
+    assert ours.max() < naive.max()

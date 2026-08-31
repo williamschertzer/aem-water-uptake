@@ -513,6 +513,56 @@ def _check_reference_matches(reference, wanted, method: str = "widom") -> None:
         )
 
 
+def bulk_settings_for(config):
+    """The reservoir settings implied by a run config.
+
+    Extracted so a caller that needs the reference *before* the loop (the
+    multi-morphology campaign, which shares one reference across trajectories)
+    derives it from the same expression the loop does. Two copies of this would
+    drift and the mismatch would surface as a spurious
+    ``_check_reference_matches`` failure.
+    """
+    from .bulk import BulkSettings
+
+    return BulkSettings(
+        water_model=config.water_model,
+        temperature=config.md.temperature,
+        pressure=config.md.pressure,
+        n_waters=bulk_n_waters(config.widom),
+        cutoff=config.md.cutoff,
+        kspace_accuracy=config.md.kspace_accuracy,
+        equil_steps=config.widom.bulk_equil_steps,
+        widom_steps=config.widom.n_blocks * config.widom.steps_per_block,
+        insertions_per_call=config.widom.insertions_per_call,
+        seed=config.widom.seed,
+    )
+
+
+def obtain_bulk_reference(config, workdir: Path | str, ranks: int | None = None):
+    """Compute (or load from cache) the bulk reference for this config.
+
+    Dispatches on ``config.mu_ex_method`` so the reference is measured by the
+    same estimator as the membrane. Mixing them would compare a FEP membrane
+    number against a Widom reservoir number, and since the Widom bias in bulk
+    water is several kcal/mol, the saturation point would move by more than the
+    effect being measured.
+    """
+    from .bulk import run_bulk_reference, run_bulk_reference_fep
+
+    settings = bulk_settings_for(config)
+    workdir = Path(workdir)
+    ranks = config.md.mpi_ranks if ranks is None else ranks
+    LOG.info("computing bulk reference by %s", config.mu_ex_method.upper())
+    if config.mu_ex_method == "fep":
+        return run_bulk_reference_fep(
+            config, settings, workdir,
+            cache_dir=config.widom.cache_dir, ranks=ranks,
+        )
+    return run_bulk_reference(
+        settings, workdir, cache_dir=config.widom.cache_dir, ranks=ranks,
+    )
+
+
 def run_uptake(
     config,
     workdir: Path | str,
@@ -534,7 +584,6 @@ def run_uptake(
     import time
 
     from .assembly import CellContents, assemble, ion_molecules, water_molecules
-    from .bulk import BulkSettings, run_bulk_reference, run_bulk_reference_fep
     from .chemistry import composition_from_config
     from .insertion import insert_waters
     from .lammps.inputs import (
@@ -557,31 +606,9 @@ def run_uptake(
     dry_mass = comp.dry_molar_mass
 
     # --- the reservoir -----------------------------------------------------
-    bulk_settings = BulkSettings(
-            water_model=config.water_model,
-            temperature=config.md.temperature,
-            pressure=config.md.pressure,
-            n_waters=bulk_n_waters(config.widom),
-            cutoff=config.md.cutoff,
-            kspace_accuracy=config.md.kspace_accuracy,
-            equil_steps=config.widom.bulk_equil_steps,
-            widom_steps=config.widom.n_blocks * config.widom.steps_per_block,
-            insertions_per_call=config.widom.insertions_per_call,
-        seed=config.widom.seed,
-    )
+    bulk_settings = bulk_settings_for(config)
     if bulk_reference is None:
-        LOG.info("no bulk reference supplied; computing one by %s",
-                 config.mu_ex_method.upper())
-        if config.mu_ex_method == "fep":
-            bulk_reference = run_bulk_reference_fep(
-                config, bulk_settings, workdir / "bulk",
-                cache_dir=config.widom.cache_dir, ranks=config.md.mpi_ranks,
-            )
-        else:
-            bulk_reference = run_bulk_reference(
-                bulk_settings, workdir / "bulk",
-                cache_dir=config.widom.cache_dir, ranks=config.md.mpi_ranks,
-            )
+        bulk_reference = obtain_bulk_reference(config, workdir / "bulk")
     _check_reference_matches(bulk_reference, bulk_settings,
                             method=getattr(bulk_reference, "method", "widom"))
     for issue in bulk_reference.sanity():

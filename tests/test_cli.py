@@ -125,11 +125,23 @@ _KNOWN_BINDINGS = {
     "ref": "aemwater.bulk:BulkReference",
     "structure": "aemwater.analysis:HydrationStructure",
     "system": "aemwater.lammps.writer:LammpsSystem",
+    # The multi-morphology layer hands whole result objects between modules,
+    # which is where invented attribute names are easiest to introduce: an
+    # earlier version of uptake_campaign.py read cell.polymer_molecules and
+    # cell.ion_molecules -- neither exists on LammpsSystem, both are methods --
+    # and the getattr defaults would have silently produced group counts of zero.
+    "campaign": "aemwater.uptake_campaign:UptakeCampaign",
+    "cell": "aemwater.lammps.writer:LammpsSystem",
+    "dry": "aemwater.prepare:DryMembrane",
+    # Not "result": driver.py already binds that name to an InsertionResult, and
+    # this table holds one type per name. The campaign uses "uptake" instead.
+    "uptake": "aemwater.driver:UptakeResult",
 }
 
 
 @pytest.mark.parametrize("module_file", [
     "prepare.py", "driver.py", "cli.py", "analysis.py", "bulk.py",
+    "uptake_campaign.py",
 ])
 def test_no_invented_attributes_on_known_types(module_file):
     """Catch `comp.n_ionic_groups` where the field is `total_ionic_groups`.
