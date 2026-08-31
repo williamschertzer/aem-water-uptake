@@ -208,8 +208,11 @@ def test_ghost_host_pair_table_covers_polymer_and_ion_types(membrane, tmp_path):
     # coupling to water types passes every other assertion in this file, which
     # is why this one is here.
     lam_expected = ladder.states[1].lambda_lj
+    # Compared elementwise rather than as ``v != {pytest.approx(...)}``: set
+    # equality goes through __hash__, so the approx never gets consulted and
+    # the comparison is always unequal.
     wrong = {t: sorted(v) for t, v in lam_by_partner.items()
-             if v != {pytest.approx(lam_expected)}}
+             if any(abs(lam - lam_expected) > 1e-6 for lam in v)}
     assert not wrong, (
         f"ghost-host pairs not at lambda_lj={lam_expected}: {wrong}. Types held "
         "at 1.0 are fully coupled in every state and cannot contribute to dU."
@@ -253,6 +256,43 @@ def test_both_legs_produce_a_physically_sized_perturbation(membrane, tmp_path, l
     dudl = (float(np.mean(cols["dU_ti_plus"]))
             - float(np.mean(cols["dU_ti_minus"]))) / (2 * config.fep.ti_delta)
     assert abs(dudl) > 0.5, f"{leg} leg: dU/dlambda is {dudl:.3f} kT"
+
+
+@needs_ambertools
+@pytest.mark.parametrize("lambda_q", [0.0, 0.5, 1.0])
+def test_the_sampled_state_carries_the_scaled_ghost_charge(membrane, lambda_q):
+    """The data file *is* the electrostatic state, so its charges must scale.
+
+    Leg 2 is applied by writing each state's charges into its own data file,
+    while the ``compute fep ... atom charge`` deltas are templated from
+    ``lambda_q`` on their own. The two are independent, so if the data-file
+    charges are left unscaled the sampled Hamiltonian is the fully charged
+    ghost while every dU is computed as though it were at ``lambda_q``. dU
+    stays large and plausible and no other assertion in this file notices --
+    the bias only shows up as a wrong free energy. This is the check that ties
+    the sampled state to the lambda it claims to be.
+    """
+    from aemwater.fep.ghost import scale_ghost_charges
+
+    ghosted, ghost, _ = membrane
+    scaled = scale_ghost_charges(ghosted, ghost, lambda_q)
+    atoms = [scaled.structure.atoms[i - 1] for i in ghost.atom_indices]
+
+    for atom in atoms:
+        full = ghost.charge_o if atom.atomic_number == 8 else ghost.charge_h
+        assert atom.charge == pytest.approx(lambda_q * full, abs=1e-9), (
+            f"ghost atom {atom.idx + 1} carries {atom.charge:+.4f} e at "
+            f"lambda_q={lambda_q}, expected {lambda_q * full:+.4f}"
+        )
+
+    # The real waters must be untouched: scaling them too would make every
+    # state a different physical system rather than an alchemical step.
+    o_type, _ = ghosted.water_atom_types()
+    ghost_ids = set(ghost.atom_indices)
+    before = [a.charge for a in ghosted.structure.atoms if a.idx + 1 not in ghost_ids]
+    after = [a.charge for a in scaled.structure.atoms if a.idx + 1 not in ghost_ids]
+    assert before == pytest.approx(after), \
+        "scaling the ghost changed charges outside the ghost molecule"
 
 
 @needs_lammps
