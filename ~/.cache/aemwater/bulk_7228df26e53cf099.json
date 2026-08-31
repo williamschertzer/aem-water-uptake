@@ -1,0 +1,28 @@
+{
+  "mu_ex": -3.621425342546691,
+  "stderr": 0.29833655151461563,
+  "n_blocks": 5,
+  "block_values": [
+    -4.026085351796781,
+    -3.7189255435063036,
+    -2.6344168421188483,
+    -2.688815556948522,
+    -3.842808168553
+  ],
+  "mean_boltzmann": 434.66417576358174,
+  "effective_samples": 5.997560502844042,
+  "volume": 15633.178181818179,
+  "density": 0.997091309090909,
+  "settings": {
+    "water_model": "spce",
+    "temperature": 300.0,
+    "pressure": 1.0,
+    "n_waters": 521,
+    "cutoff": 10.0,
+    "kspace_accuracy": 0.0001,
+    "equil_steps": 50000,
+    "widom_steps": 500000,
+    "insertions_per_call": 400,
+    "seed": 31337
+  }
+}
