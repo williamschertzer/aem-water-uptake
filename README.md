@@ -32,7 +32,10 @@ reaches zero.
 
 This package measures that directly. Each iteration inserts a batch of water,
 lets the cell swell at constant pressure, and measures the excess chemical
-potential of water in the swollen membrane by Widom test-particle insertion.
+potential of water in the swollen membrane by alchemically coupling a single
+ghost SPC/E water (`mu_ex.method: fep`, the default). Widom test-particle
+insertion remains available as `mu_ex.method: widom` but is not recommended --
+see "Limitations" for the measured reason.
 The loop stops when
 
     mu_ex(membrane) >= mu_ex(bulk water) - tolerance
@@ -66,7 +69,8 @@ SMILES ──▶ chain builder ──▶ GAFF2 typing ──▶ packed cell ─�
                                                                   │
                         ┌─────────────────────────────────────────┘
                         ▼
-              ┌──▶ void detection ──▶ insert batch ──▶ NPT relax ──▶ Widom
+              ┌──▶ void detection ──▶ insert batch ──▶ NPT relax ──▶ mu_ex
+              │                                              (FEP or Widom)
               │                                                        │
               └──────────── not saturated ◀────── compare to bulk ◀────┘
                                                          │
@@ -109,11 +113,22 @@ rejects. This beats random insertion (which fails almost always at a few percent
 free volume) and grand-canonical Monte Carlo (which converges slowly in a glassy
 matrix).
 
-**Measurement.** Widom insertion with `full_energy`, block-averaged. The
-Boltzmann average is dominated by rare favourable insertions, so the Kish
+**Measurement (default: `fep`).** One ghost SPC/E water with its own atom
+types is coupled to the cell over a ladder of fixed-lambda NVT simulations:
+soft-core Lennard-Jones first at zero charge, then electrostatics at full LJ.
+Neighbouring states are combined with MBAR/BAR, cross-checked against
+finite-difference thermodynamic integration on the same trajectories, and
+averaged over several independently equilibrated morphologies. Because the
+ghost is a distinct set of types, scaling its interactions leaves every real
+water untouched. See `docs/fep_design.md` for the soft-core form, the exact
+LAMMPS commands, and the bulk validation.
+
+**Measurement (`widom`).** Widom insertion with `full_energy`, block-averaged.
+The Boltzmann average is dominated by rare favourable insertions, so the Kish
 effective sample size is reported alongside the standard error and an estimate
 carried by fewer than ten effective samples is flagged rather than returned
-silently.
+silently. Retained for comparison; at affordable insertion counts it does not
+converge (see "Limitations").
 
 ---
 
@@ -228,7 +243,25 @@ insertion:
   batch_fraction: 0.25      # waters added per iteration, as a fraction of content
   max_iterations: 40
 
-widom:
+mu_ex_method: fep           # fep (default) | widom
+
+fep:
+  n_morphologies: 3         # independently equilibrated cells to average over
+  lj_lambdas: [0.0, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+  coul_lambdas: [0.0, 0.2, 0.4, 0.5, 0.6, 0.8, 1.0]
+  soft_core_n: 1            # soft-core exponent; with alpha_lj below
+  alpha_lj: 0.5
+  alpha_coul: 10.0
+  equil_steps: 50000
+  production_steps: 500000
+  sample_every: 1000        # must leave >= ~20 frames per state
+  estimators: [mbar, bar, ti]
+  ti_delta: 0.01            # finite-difference step for dU/dlambda
+  min_overlap: 0.03         # flag neighbouring states below this
+  max_stderr: 0.3           # kcal/mol; convergence budget on the CI half-width
+  seed: 90210
+
+widom:                      # only used when mu_ex_method: widom
   n_blocks: 5
   steps_per_block: 100000
   sigma_tolerance: 2.0      # saturation when the gap is within 2 sigma
@@ -236,6 +269,11 @@ widom:
 ```
 
 Write a starting point with `RunConfig().dump_yaml("membrane.yaml")`.
+
+**`fep.n_morphologies` is a requirement, not a hint.** The membrane campaign
+refuses to average over fewer equilibrated cells than configured rather than
+reporting a between-morphology error bar that rests on less replication than
+the config claims.
 
 **`md.timestep` (default 1.0 fs) is coupled to the constraints, and raising it
 degrades the measurement.** Water is always rigid -- SPC/E and TIP3P are defined
@@ -287,16 +325,25 @@ counterion is approximate. Absolute uptakes from any non-polarisable model
 carry a systematic error; the ranking between chemistries is more reliable than
 the absolute number.
 
-**Widom insertion is far from converged at affordable insertion counts, and
-this is the dominant caveat of the whole method.** It is not specific to the
-membrane: 90k insertions into *bulk* SPC/E water at 298 K gave
-mu_ex = -2.74 +/- 0.64 kcal/mol against a published -6.5, with the Boltzmann
-average spanning four orders of magnitude across blocks and an effective sample
-size of 3.2. The average is carried by the rare trials that land in a cavity,
-so it approaches the true value from above and reaching it takes of order 10^6
-insertions -- hours of serial CPU for the reference alone.
+**Widom insertion is far from converged at affordable insertion counts. This
+was the dominant caveat of the method and is why `fep` is now the default.**
+It was not specific to the membrane: 90k insertions into *bulk* SPC/E water at
+298 K gave mu_ex = -2.74 +/- 0.64 kcal/mol against a published -6.5, with the
+Boltzmann average spanning four orders of magnitude across blocks and an
+effective sample size of 3.2. The average is carried by the rare trials that
+land in a cavity, so it approaches the true value from above and reaching it
+takes of order 10^6 insertions -- hours of serial CPU for the reference alone.
 
-Two consequences follow, and the second is the reason the method still works.
+The alchemical path removes this error rather than working around it: on the
+same water model, two morphologies at deliberately cheap settings give
+mu_ex = -6.825 kcal/mol, 95% CI [-7.206, -6.444], which brackets the published
+value (`docs/fep_design.md`). The remaining FEP caveats are different in kind
+-- ladder adequacy, between-morphology replication at small M, and the fact
+that the fixed-lambda states run NVT so density is an input rather than a
+result -- and are documented there.
+
+The rest of this subsection applies only to `mu_ex.method: widom`. Two
+consequences follow, and the second is why that backend was usable at all.
 
 First, `BulkReference.mu_ex` is not a measurement of the excess chemical
 potential of water and must not be reported as one. `sanity()` says so, and
@@ -317,8 +364,8 @@ The run is still least reliable at low hydration, where insertions almost always
 overlap; the endpoint, measured on a swollen cell, is the best-sampled point.
 
 **Cell size.** A cell whose edge is comparable to the water cluster size biases
-both the Widom estimate and the percolation analysis. The example runs are small
-enough for a laptop and are not production settings.
+the mu_ex estimate under either backend and the percolation analysis with it.
+The example runs are small enough for a laptop and are not production settings.
 
 **The measured quantity is equilibrium uptake in contact with liquid water**
 (activity 1). Uptake from vapour at lower activity requires a different
@@ -337,7 +384,10 @@ src/aemwater/
   assembly.py     molecules + coordinates -> one system
   lammps/         data-file writer, input templates, runner, log parser
   insertion.py    void detection and water placement
-  widom.py        chemical potential estimation
+  fep/            alchemical mu_ex: ghost water, lambda schedules, state
+                  inputs, rerun/energy matrix, MBAR/BAR/TI, campaign,
+                  diagnostic figures
+  widom.py        chemical potential estimation (alternative backend)
   bulk.py         bulk water reference
   prepare.py      dry membrane construction
   driver.py       the uptake loop
