@@ -131,3 +131,131 @@ def test_spread_is_reported_so_a_reader_can_see_morphology_dependence():
     camp = combine_uptake([_morph(0, 20.0), _morph(1, 30.0)], -6.8)
     assert camp.diagnostics["spread_wt_pct"] == pytest.approx(10.0)
     assert camp.diagnostics["water_uptake_per_morphology"] == [20.0, 30.0]
+
+
+# --- orchestration -----------------------------------------------------------
+#
+# These stub prepare_dry_membrane and run_uptake rather than skipping without
+# LAMMPS. What is being tested is the wiring -- that each morphology gets a
+# different packing seed, that the reference is computed once, that one failure
+# does not abort the campaign -- and every one of those is a plain bug that
+# would otherwise surface only after hours of cluster time.
+
+import types
+
+import pytest
+
+from aemwater.config import PolymerSpec, RunConfig
+
+
+@pytest.fixture
+def stubbed(monkeypatch):
+    """Record what the orchestrator passes to each expensive call."""
+    import aemwater.driver as driver
+    import aemwater.prepare as prepare
+    import aemwater.uptake_campaign as campaign_mod
+
+    calls = {"seeds": [], "references": 0, "fep": []}
+
+    def fake_prepare(config, workdir):
+        calls["seeds"].append(config.box.seed)
+        calls["fep"].append(
+            (len(config.fep.lj_lambdas), len(config.fep.coul_lambdas),
+             config.fep.production_steps)
+        )
+        return types.SimpleNamespace(typed_chains=["chain"])
+
+    def fake_reference(config, workdir, ranks=None):
+        calls["references"] += 1
+        estimate = types.SimpleNamespace(mu_ex=-6.83)
+        return types.SimpleNamespace(
+            mu_ex=estimate, sanity=lambda: [], settings=None, method="fep")
+
+    def fake_uptake(config, workdir, typed_chains, bulk_reference=None, resume=True):
+        assert bulk_reference is not None, "trajectory ran without a reference"
+        index = len(calls["seeds"]) - 1
+        return types.SimpleNamespace(
+            n_waters=100 + index, lambda_value=10.0 + index,
+            water_uptake_pct=25.0 + index, hydrated_density=1.1,
+            stop_reason="saturated", converged=True, iterations=[1, 2, 3],
+            bulk_mu_ex=-6.83,
+        )
+
+    monkeypatch.setattr(prepare, "prepare_dry_membrane", fake_prepare)
+    monkeypatch.setattr(driver, "obtain_bulk_reference", fake_reference)
+    monkeypatch.setattr(driver, "run_uptake", fake_uptake)
+    return calls, campaign_mod
+
+
+def _config():
+    return RunConfig(polymer=PolymerSpec(smiles="O"))
+
+
+def test_each_morphology_gets_a_different_packing_seed(stubbed, tmp_path):
+    """Same seed twice would give two copies of one packing and a fake spread."""
+    calls, mod = stubbed
+    mod.run_uptake_campaign(_config(), tmp_path, n_morphologies=3)
+    assert len(calls["seeds"]) == 3
+    assert len(set(calls["seeds"])) == 3
+
+
+def test_bulk_reference_is_computed_once_for_the_whole_campaign(stubbed, tmp_path):
+    """Per-morphology references would put reference noise into the spread."""
+    calls, mod = stubbed
+    mod.run_uptake_campaign(_config(), tmp_path, n_morphologies=3)
+    assert calls["references"] == 1
+
+
+def test_screening_resolution_reaches_the_trajectories(stubbed, tmp_path):
+    """The preset is pointless if the loop still runs the production ladder."""
+    calls, mod = stubbed
+    mod.run_uptake_campaign(_config(), tmp_path, n_morphologies=2, screening=True)
+    assert all(n_lj == 7 and n_co == 7 and steps == 150_000
+               for n_lj, n_co, steps in calls["fep"])
+
+
+def test_production_resolution_is_passed_through_unchanged(stubbed, tmp_path):
+    calls, mod = stubbed
+    prod = _config()
+    mod.run_uptake_campaign(prod, tmp_path, n_morphologies=2, screening=False)
+    assert all(n_lj == len(prod.fep.lj_lambdas) and steps == prod.fep.production_steps
+               for n_lj, _, steps in calls["fep"])
+
+
+def test_one_failed_morphology_does_not_abort_the_campaign(
+        stubbed, tmp_path, monkeypatch):
+    """Hours of successful trajectories must not be lost to one crash."""
+    calls, mod = stubbed
+    import aemwater.driver as driver
+
+    real = driver.run_uptake
+
+    def flaky(config, workdir, typed_chains, **kw):
+        if len(calls["seeds"]) == 2:
+            raise RuntimeError("LAMMPS segfault")
+        return real(config, workdir, typed_chains, **kw)
+
+    monkeypatch.setattr(driver, "run_uptake", flaky)
+    result = mod.run_uptake_campaign(_config(), tmp_path, n_morphologies=3)
+
+    assert len(result.per_morphology) == 3
+    assert result.n_usable == 2
+    failed = [m for m in result.per_morphology if not m.usable]
+    assert "LAMMPS segfault" in failed[0].failure
+
+
+def test_campaign_writes_a_report_with_every_morphology(stubbed, tmp_path):
+    """A reader must be able to see the spread, not only the mean."""
+    import json
+
+    calls, mod = stubbed
+    mod.run_uptake_campaign(_config(), tmp_path, n_morphologies=3)
+    payload = json.loads((tmp_path / "uptake_campaign.json").read_text())
+    assert len(payload["per_morphology"]) == 3
+    assert payload["n_morphologies_usable"] == 3
+
+
+def test_zero_morphologies_is_rejected(stubbed, tmp_path):
+    calls, mod = stubbed
+    with pytest.raises(mod.UptakeCampaignError, match="must be >= 1"):
+        mod.run_uptake_campaign(_config(), tmp_path, n_morphologies=0)

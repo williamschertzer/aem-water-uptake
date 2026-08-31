@@ -154,7 +154,7 @@ GPU switches are passed to every LAMMPS stage through
 `AEMWATER_LAMMPS_ARGS`. The script deliberately uses one MPI rank per GPU;
 increase both together only when requesting additional GPUs.
 
-### Three phases, separately invocable
+### Phases, separately invocable
 
 ```bash
 aemwater prepare --config membrane.yaml    # dry membrane (expensive, reusable)
@@ -170,6 +170,33 @@ The bulk reference is cached on a hash of every setting that shifts `mu_ex`
 (water model, temperature, pressure, cutoff, kspace accuracy, box size, sampling
 lengths). It is computed once and reused by every membrane sharing those
 settings.
+
+### Reporting a number: `aemwater campaign`
+
+`run` gives one packing's saturation point. It has no error bar, because a
+single packing measures no spread — and in a glassy matrix the spread between
+packings is usually the dominant uncertainty.
+
+```bash
+aemwater campaign --config membrane.yaml --morphologies 3
+```
+
+This runs the whole loop three times from three independent packings and reports
+the mean uptake with a between-morphology standard error and a Student-t 95%
+interval. Use it for anything you intend to quote; use `run` to inspect a single
+trajectory.
+
+Per-iteration `mu_ex` runs at screening resolution (7+7 lambda states, 150k
+steps per state) which is 6.4x cheaper than production resolution, so three
+screening trajectories cost less than one production trajectory. The saturation
+point is where two curves cross, and a crossing does not move with the third
+decimal of either curve. Pass `--production-resolution` to disable this.
+
+Trajectories that never saturated are excluded from the average — their water
+content is a lower bound, and averaging it in would bias the result low without
+showing up in the error bar. A morphology that crashes is recorded and excluded
+rather than killing the campaign. With only one usable morphology the campaign
+reports `nan` for the error, not `0.0`.
 
 ### Configuration
 
