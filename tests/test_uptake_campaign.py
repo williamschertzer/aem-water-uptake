@@ -259,3 +259,63 @@ def test_zero_morphologies_is_rejected(stubbed, tmp_path):
     calls, mod = stubbed
     with pytest.raises(mod.UptakeCampaignError, match="must be >= 1"):
         mod.run_uptake_campaign(_config(), tmp_path, n_morphologies=0)
+
+
+def test_completed_morphology_does_not_rebuild_its_dry_membrane(
+        stubbed, tmp_path, monkeypatch):
+    """A requeued campaign must not re-anneal finished morphologies.
+
+    The anneal plus GAFF2 charge derivation dominates per-morphology cost. An
+    earlier version called prepare_dry_membrane unconditionally, so a requeue
+    paid that cost again for every already-finished morphology -- silently,
+    because the uptake loop underneath *did* resume and reported success. On the
+    preemptible queue the campaign script targets, that is the difference
+    between resumable and unable to finish.
+    """
+    calls, mod = stubbed
+    import aemwater.prepare as prepare
+
+    builds = []
+    real_obtain = prepare.obtain_dry_membrane
+
+    def counting_obtain(config, workdir, *, resume=True):
+        from pathlib import Path
+        dry_data = Path(workdir) / "dry" / "dry.data"
+        rebuilt = not (resume and dry_data.exists())
+        builds.append(rebuilt)
+        # Materialise the checkpoint the way a real run would.
+        dry_data.parent.mkdir(parents=True, exist_ok=True)
+        dry_data.touch()
+        return ["chain"], not rebuilt
+
+    monkeypatch.setattr(prepare, "obtain_dry_membrane", counting_obtain)
+
+    mod.run_uptake_campaign(_config(), tmp_path, n_morphologies=2)
+    assert builds == [True, True], "first pass must build both"
+
+    builds.clear()
+    mod.run_uptake_campaign(_config(), tmp_path, n_morphologies=2)
+    assert builds == [False, False], "second pass must reuse, not rebuild"
+
+
+def test_force_rebuilds_even_when_a_checkpoint_exists(stubbed, tmp_path, monkeypatch):
+    """resume=False must actually reach the dry-membrane decision."""
+    calls, mod = stubbed
+    import aemwater.prepare as prepare
+
+    rebuilt = []
+
+    def counting_obtain(config, workdir, *, resume=True):
+        from pathlib import Path
+        dry_data = Path(workdir) / "dry" / "dry.data"
+        rebuilt.append(not (resume and dry_data.exists()))
+        dry_data.parent.mkdir(parents=True, exist_ok=True)
+        dry_data.touch()
+        return ["chain"], False
+
+    monkeypatch.setattr(prepare, "obtain_dry_membrane", counting_obtain)
+
+    mod.run_uptake_campaign(_config(), tmp_path, n_morphologies=1)
+    rebuilt.clear()
+    mod.run_uptake_campaign(_config(), tmp_path, n_morphologies=1, resume=False)
+    assert rebuilt == [True]

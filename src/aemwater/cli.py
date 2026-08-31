@@ -173,7 +173,7 @@ def cmd_campaign(args) -> int:
 
 def cmd_run(args) -> int:
     from .driver import run_uptake
-    from .prepare import prepare_dry_membrane
+    from .prepare import obtain_dry_membrane
 
     config = _load_config(args)
     workdir = args.workdir
@@ -192,23 +192,8 @@ def cmd_run(args) -> int:
             "kcal/mol; no bulk simulation or cache validation will be performed",
             bulk_mu, bulk_err,
         )
-    dry_data = workdir / "dry" / "dry.data"
-    if dry_data.exists() and not args.force:
-        LOG.info("reusing the dry membrane in %s", dry_data.parent)
-        from .forcefield.gaff2 import GAFF2Backend
-        from .polymer import build_chain
-
-        # Re-typing is unavoidable when resuming: the ParmEd structures are not
-        # part of the checkpoint. It is cheaper than the anneal it skips.
-        chain = build_chain(config.polymer.smiles, config.polymer.chain_length,
-                            terminal_group=config.polymer.terminal_group,
-                            seed=config.box.seed)
-        backend = GAFF2Backend(charge_method=config.polymer.charge_method)
-        typed, _ = backend.type_chain(chain, workdir / "dry" / "typing")
-        typed_chains = [typed] * config.polymer.n_chains
-    else:
-        dry = prepare_dry_membrane(config, workdir)
-        typed_chains = dry.typed_chains
+    typed_chains, _reused = obtain_dry_membrane(
+        config, workdir, resume=not args.force)
 
     result = run_uptake(
         config, workdir, typed_chains, bulk_reference=bulk_reference,

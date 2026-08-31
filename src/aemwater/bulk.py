@@ -233,7 +233,12 @@ def run_bulk_reference_fep(
 
     workdir = Path(workdir)
     workdir.mkdir(parents=True, exist_ok=True)
-    cache = Path(cache_dir) if cache_dir else workdir.parent / "bulk_cache"
+    # expanduser() is not optional: the default cache_dir is the string
+    # "~/.cache/aemwater", and Path() does not expand "~". Without this the
+    # "global" cache becomes a literal ./~/ directory relative to the current
+    # working directory, so it silently stops being shared -- every run from a
+    # different cwd recomputes the reference and .gitignore acquires a /~/ entry.
+    cache = Path(cache_dir).expanduser() if cache_dir else workdir.parent / "bulk_cache"
     cache.mkdir(parents=True, exist_ok=True)
     cache_file = cache / f"bulkfep_{fep_cache_key(settings, config.fep)}.json"
 
@@ -343,7 +348,8 @@ def run_bulk_reference(
 
     workdir = Path(workdir)
     workdir.mkdir(parents=True, exist_ok=True)
-    cache = Path(cache_dir) if cache_dir else workdir.parent / "bulk_cache"
+    # See the note in run_bulk_reference_fep: Path() does not expand "~".
+    cache = Path(cache_dir).expanduser() if cache_dir else workdir.parent / "bulk_cache"
     cache.mkdir(parents=True, exist_ok=True)
     cache_file = cache / f"bulk_{settings.key()}.json"
 

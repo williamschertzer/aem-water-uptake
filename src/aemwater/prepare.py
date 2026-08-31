@@ -366,10 +366,48 @@ def prepare_dry_membrane(config, workdir: Path | str) -> DryMembrane:
                        len(coords), typed_chains, comp, convergence)
 
 
+def obtain_dry_membrane(config, workdir: Path | str, *, resume: bool = True):
+    """The equilibrated dry cell, rebuilt only if there isn't one to reuse.
+
+    Returns ``(typed_chains, reused)``.
+
+    Factored out of ``cli.cmd_run`` so that every caller that needs a dry
+    membrane shares one reuse policy. The multi-morphology campaign called
+    ``prepare_dry_membrane`` unconditionally, which meant a requeued campaign
+    re-annealed and re-derived GAFF2 charges for every already-finished
+    morphology -- hours each, and silently, because the uptake loop underneath
+    it *did* resume correctly and reported success. On a preemptible queue that
+    turns a resumable campaign into one that cannot finish.
+
+    Re-typing the chains on reuse is unavoidable: the ParmEd structures are not
+    part of the checkpoint. It is still far cheaper than the anneal it skips.
+    """
+    workdir = Path(workdir)
+    dry_data = workdir / "dry" / "dry.data"
+
+    if resume and dry_data.exists():
+        from .forcefield.gaff2 import GAFF2Backend
+        from .polymer import build_chain
+
+        LOG.info("reusing the dry membrane in %s", dry_data.parent)
+        chain = build_chain(
+            config.polymer.smiles, config.polymer.chain_length,
+            terminal_group=config.polymer.terminal_group,
+            seed=config.box.seed,
+        )
+        backend = GAFF2Backend(charge_method=config.polymer.charge_method)
+        typed, _ = backend.type_chain(chain, workdir / "dry" / "typing")
+        return [typed] * config.polymer.n_chains, True
+
+    dry = prepare_dry_membrane(config, workdir)
+    return dry.typed_chains, False
+
+
 __all__ = [
     "DryMembrane",
     "DryConvergence",
     "EquilibrationError",
     "check_dry_convergence",
+    "obtain_dry_membrane",
     "prepare_dry_membrane",
 ]

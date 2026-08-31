@@ -198,6 +198,14 @@ showing up in the error bar. A morphology that crashes is recorded and excluded
 rather than killing the campaign. With only one usable morphology the campaign
 reports `nan` for the error, not `0.0`.
 
+Campaigns resume by default, at both levels: a morphology that already has an
+equilibrated dry cell reuses it instead of re-annealing, and its uptake loop
+continues from its last checkpointed iteration. That makes the campaign safe to
+run on a preemptible queue — requeue the same job and it continues rather than
+restarting. `examples/submit_phoenix_campaign.slurm` is set up this way, and
+preflights the LAMMPS FEP package so a build missing it fails in one second
+rather than after the first dry membrane has been built.
+
 ### Configuration
 
 ```yaml

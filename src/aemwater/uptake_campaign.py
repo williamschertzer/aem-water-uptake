@@ -194,7 +194,7 @@ def run_uptake_campaign(
     rather than restarting.
     """
     from .driver import obtain_bulk_reference, run_uptake
-    from .prepare import prepare_dry_membrane
+    from .prepare import obtain_dry_membrane
 
     workdir = Path(workdir)
     workdir.mkdir(parents=True, exist_ok=True)
@@ -259,12 +259,19 @@ def run_uptake_campaign(
         LOG.info("uptake campaign: morphology %d/%d (box seed %d) in %s",
                  index + 1, m_count, seed, mdir)
         try:
-            dry = prepare_dry_membrane(mconfig, mdir)
+            # Reuse an already-equilibrated cell rather than rebuilding it. The
+            # anneal and GAFF2 charge derivation dominate per-morphology cost,
+            # so an unconditional rebuild here would make a requeued campaign on
+            # a preemptible queue unable to make forward progress.
+            typed_chains, reused = obtain_dry_membrane(
+                mconfig, mdir, resume=resume)
+            if reused:
+                LOG.info("morphology %d: reused its dry membrane", index)
             # Named "uptake", not "result": driver.py binds "result" to an
             # InsertionResult, and the attribute guard in tests/test_cli.py
             # holds one type per variable name across the audited modules.
             uptake = run_uptake(
-                mconfig, mdir, dry.typed_chains,
+                mconfig, mdir, typed_chains,
                 bulk_reference=shared_reference, resume=resume,
             )
             results.append(MorphologyUptake(

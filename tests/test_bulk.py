@@ -169,3 +169,39 @@ def test_widom_template_self_energy_is_the_scale_of_the_bug():
     self_energy = (2 * coulomb * m.charge_O * m.charge_H / m.r_OH
                    + coulomb * m.charge_H**2 / r_hh)
     assert self_energy < -150.0
+
+
+def test_cache_dir_expands_the_home_tilde(tmp_path, monkeypatch):
+    """The default cache_dir is the *string* "~/.cache/aemwater".
+
+    Path() does not expand "~", so an unexpanded cache_dir silently creates a
+    literal ./~/ directory relative to the cwd. The cache then stops being
+    shared -- every run from a different working directory recomputes an
+    expensive bulk reference and believes it was cached. This repo carried a
+    committed .gitignore entry for /~/ and two stale Widom-era cache files in
+    ./~/.cache/aemwater/ as evidence of exactly that.
+    """
+    from pathlib import Path
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    resolved = Path("~/.cache/aemwater").expanduser()
+    assert not str(resolved).startswith("~"), "tilde survived expansion"
+    assert resolved.is_absolute(), f"cache dir must be absolute, got {resolved}"
+
+
+def test_no_literal_tilde_directory_is_created_by_a_default_cache_dir(tmp_path):
+    """Regression guard on the source, not the filesystem.
+
+    A future edit that reintroduces bare Path(cache_dir) would recreate the
+    ./~/ directory, and the existing .gitignore entry would hide it again.
+    """
+    import inspect
+
+    import aemwater.bulk as bulk
+
+    src = inspect.getsource(bulk)
+    bare = [
+        line.strip() for line in src.splitlines()
+        if "Path(cache_dir)" in line and "expanduser" not in line
+    ]
+    assert not bare, f"cache_dir used without expanduser(): {bare}"

@@ -7,7 +7,6 @@ dist/
 .pytest_cache/
 .coverage
 htmlcov/
-/~/
 
 # run outputs
 *.lammpstrj
