@@ -181,6 +181,13 @@ aemwater run --config membrane.yaml        # the loading loop
 enough. They are exposed separately because both are expensive and worth
 inspecting before committing to a loop.
 
+For a laptop-scale run of all three stages in ~11 minutes, plus a reading of the
+warnings such a run emits, see `docs/running_end_to_end.md`:
+
+```bash
+PYTHONPATH=src python examples/run_e2e_fep.py
+```
+
 The bulk reference is cached on a hash of every setting that shifts `mu_ex`
 (water model, temperature, pressure, cutoff, kspace accuracy, box size, sampling
 lengths). It is computed once and reused by every membrane sharing those
@@ -298,6 +305,38 @@ completed iteration:
 aemwater run --config membrane.yaml      # resumes
 aemwater run --config membrane.yaml --force   # starts over
 ```
+
+FEP campaigns resume at three granularities, since one campaign is
+`n_morphologies` x (`len(lj_lambdas)` + `len(coul_lambdas)`) independent LAMMPS
+runs plus a rerun pass of the same order:
+
+| unit | reused when |
+| --- | --- |
+| morphology | `morph<NN>/morphology.json` holds a finite estimate |
+| lambda window | the state log ends in LAMMPS's wall-time line **and** `fep.dat`, `pe.dat`, `traj.lammpstrj` are all non-empty |
+| rerun pass | `rerun_<j>.log` ended cleanly, `rerun_<j>.dat` is non-empty, and window `j` was not re-sampled this invocation |
+
+```bash
+python examples/fep_water_validation.py               # start or resume
+python examples/fep_water_validation.py --no-resume   # discard and restart
+python examples/fep_water_validation.py --ranks 8
+```
+
+Completeness is judged from what LAMMPS wrote, not from a marker this package
+writes: a marker can outlive the thing it describes. A window killed
+mid-trajectory is redone from its start rather than restarted mid-way, because a
+half-length trace carries less weight in the estimators than its neighbours and
+would quietly reweight the ladder.
+
+Each run directory holds a `campaign_stamp.json` naming the protocol that wrote
+it — ladders, sampling lengths, state point, box size. Resuming into a directory
+written under different settings raises rather than proceeding, because
+averaging windows from two protocols into one `mu_ex` passes every downstream
+check: each individual window is internally consistent. Membrane morphologies
+additionally carry a `cell_stamp.json` fingerprinting the supplied
+configuration, since those cells come from the caller and a later uptake
+iteration would otherwise supply a *different* cell with the same atom count and
+type table.
 
 ---
 

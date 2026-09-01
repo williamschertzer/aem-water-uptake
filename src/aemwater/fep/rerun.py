@@ -39,8 +39,10 @@ from typing import Sequence
 import numpy as np
 
 from ..lammps.runner import run_lammps
+from ..lammps.writer import SPECIAL_BONDS, bonded_style_lines
 from ..utils import LOG
 from .ghost import GhostTopology, ghost_pair_coeff_lines
+from .resume import rerun_complete
 from .schedule import FEPLeg, LambdaLadder, LambdaState
 
 #: Frames whose energy the rerun must reproduce to better than this, in
@@ -194,9 +196,18 @@ def write_rerun_input(
         f"{spec.alpha_lj} {spec.alpha_coul} {md.cutoff} {md.cutoff}",
         "pair_modify     mix arithmetic",
         f"kspace_style    pppm {spec.kspace_accuracy}",
-        "bond_style      harmonic",
-        "angle_style     harmonic",
-        "special_bonds   lj 0.0 0.0 0.5 coul 0.0 0.0 0.8333333333",
+        # From the shared constant, not spelled out here. This header once
+        # emitted only the bond and angle styles, which no bulk-water run could
+        # reveal -- SPC/E has neither dihedrals nor impropers, so read_data
+        # never reached the sections that require them. The first polymer
+        # reweight failed with "Must define dihedral_style before Dihedral
+        # Coeffs".
+        #
+        # The hard failure was the lucky outcome: these styles are part of the
+        # Hamiltonian this rerun must reproduce, so silently dropping the
+        # torsions would have produced a wrong energy rather than an error.
+        *bonded_style_lines(),
+        f"special_bonds   {SPECIAL_BONDS}",
         f"read_data       {data_file}",
         "",
         f"# force field pinned at the sampled state, lambda_lj={source.lambda_lj:g}",
@@ -249,6 +260,8 @@ def build_energy_matrix(
     workdir: Path,
     data_file: str | Path | None = None,
     lammps_args: Sequence[str] = (),
+    resume: bool = True,
+    stale: Sequence[int] = (),
 ) -> EnergyMatrix:
     """Run the rerun pass for one leg and assemble ``u_kn``.
 
@@ -264,6 +277,10 @@ def build_energy_matrix(
     rather than deriving a filename means a layout change cannot silently point
     the rerun at a topology that differs from the one sampled; the diagonal check
     below would catch that, but only after paying for the whole pass.
+
+    ``stale`` are source-state indices re-sampled in this invocation, whose reruns
+    on disk describe a trajectory that no longer exists. They are recomputed even
+    under ``resume``.
     """
     states = ladder.states
     if len(state_dirs) != len(states) or len(systems) != len(states):
@@ -294,12 +311,19 @@ def build_energy_matrix(
             out_file=out,
             sample_every=config.fep.sample_every,
         )
-        run_lammps(
-            workdir / f"rerun_{j}.in",
-            workdir=workdir,
-            log_name=f"rerun_{j}.log",
-            extra_args=list(lammps_args) or None,
-        )
+        # A reused rerun is not a trusted rerun: the diagonal check below
+        # recomputes against this state's pe.dat every time the matrix is built,
+        # so a stale or mismatched rerun_j.dat fails there rather than passing
+        # silently. That is what makes skipping the invocation safe.
+        if resume and j not in set(stale) and rerun_complete(workdir, j):
+            LOG.info("fep rerun: reusing pass %d/%d", j + 1, len(states))
+        else:
+            run_lammps(
+                workdir / f"rerun_{j}.in",
+                workdir=workdir,
+                log_name=f"rerun_{j}.log",
+                extra_args=list(lammps_args) or None,
+            )
         table = _read_two_column(workdir / out)
 
         if table.shape[0] != sampled.shape[0]:

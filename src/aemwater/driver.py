@@ -75,7 +75,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .utils import LOG
+from .utils import LOG, read_json_or_none, write_json
 from .widom import SaturationTest, WidomEstimate, read_widom_file
 
 
@@ -349,8 +349,14 @@ def _resume_data_file(
 
 
 def _write_state(path: Path, payload: dict) -> None:
-    """Checkpoint the loop so an interrupted run resumes instead of restarting."""
-    path.write_text(json.dumps(payload, indent=2, default=str))
+    """Checkpoint the loop so an interrupted run resumes instead of restarting.
+
+    Atomic, because this file is rewritten after *every* iteration: it is the
+    checkpoint most likely to be the one in flight when a walltime kill lands,
+    and a half-written copy would make the next run discard a whole hydration
+    trajectory rather than the last iteration.
+    """
+    write_json(path, payload)
 
 
 def _membrane_mu_ex_fep(config, stage: Path, contents, coords, edge, step: int):
@@ -586,7 +592,8 @@ def bulk_settings_for(config):
     )
 
 
-def obtain_bulk_reference(config, workdir: Path | str, ranks: int | None = None):
+def obtain_bulk_reference(config, workdir: Path | str, ranks: int | None = None,
+                          resume: bool = True):
     """Compute (or load from cache) the bulk reference for this config.
 
     Dispatches on ``config.mu_ex_method`` so the reference is measured by the
@@ -604,10 +611,11 @@ def obtain_bulk_reference(config, workdir: Path | str, ranks: int | None = None)
     if config.mu_ex_method == "fep":
         return run_bulk_reference_fep(
             config, settings, workdir,
-            cache_dir=config.widom.cache_dir, ranks=ranks,
+            cache_dir=config.widom.cache_dir, ranks=ranks, resume=resume,
         )
     return run_bulk_reference(
         settings, workdir, cache_dir=config.widom.cache_dir, ranks=ranks,
+        resume=resume,
     )
 
 
@@ -656,7 +664,8 @@ def run_uptake(
     # --- the reservoir -----------------------------------------------------
     bulk_settings = bulk_settings_for(config)
     if bulk_reference is None:
-        bulk_reference = obtain_bulk_reference(config, workdir / "bulk")
+        bulk_reference = obtain_bulk_reference(config, workdir / "bulk",
+                                               resume=resume)
     _check_reference_matches(bulk_reference, bulk_settings,
                             method=getattr(bulk_reference, "method", "widom"))
     for issue in bulk_reference.sanity():
@@ -709,8 +718,9 @@ def run_uptake(
     failed_batches = 0
     start_step = 0
 
-    if resume and state_file.exists():
-        saved = json.loads(state_file.read_text())
+    saved = read_json_or_none(state_file, description="uptake checkpoint") \
+        if resume else None
+    if saved is not None:
         iterations = [Iteration(**row) for row in saved.get("iterations", [])]
         n_waters = saved.get("n_waters", 0)
         mu_gap = saved.get("mu_gap")

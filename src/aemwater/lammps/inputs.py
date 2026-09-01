@@ -356,13 +356,22 @@ def stage_spec(md) -> StageSpec:
 
 
 def _environment() -> Environment:
-    return Environment(
+    env = Environment(
         loader=FileSystemLoader(str(TEMPLATE_DIR)),
         undefined=StrictUndefined,  # a missing variable is a bug, not a blank
         trim_blocks=True,
         lstrip_blocks=False,
         keep_trailing_newline=True,
     )
+    # Injected as globals rather than passed per call: every template that
+    # reads a data file written by writer.py must declare the same bonded
+    # styles and 1-4 scaling, so there is nothing for a caller to decide. The
+    # three copies of these lines had already drifted once -- see BONDED_STYLES.
+    from .writer import SPECIAL_BONDS, bonded_style_lines
+
+    env.globals["bonded_styles"] = bonded_style_lines()
+    env.globals["special_bonds"] = SPECIAL_BONDS
+    return env
 
 
 def render_input(template: str, path: Path, **context: Any) -> Path:

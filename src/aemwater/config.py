@@ -491,13 +491,27 @@ class FEPSpec:
         The ladders are placed at equal thermodynamic length from the bulk
         SPC/E validation run's measured fluctuation profile; see
         :mod:`aemwater.fep.schedule` for why that metric and not equal work.
+
+        Every substitution here is a *ceiling*, never an override. A preset
+        whose job is to make the loop cheaper must not make it more expensive
+        than what was configured: someone who deliberately sets 2k production
+        steps for a pipeline smoke test would otherwise get 150k per state at
+        every iteration, silently, and conclude the end-to-end run is
+        unaffordable. The same reasoning already governed ``n_morphologies``
+        and ``max_stderr``; it applies to the step counts and the ladders too.
+        The ladders are compared on state count rather than placement, since a
+        shorter user ladder is the cheaper one whatever its spacing.
         """
         return replace(
             self,
-            lj_lambdas=SCREENING_LJ_LAMBDAS,
-            coul_lambdas=SCREENING_COUL_LAMBDAS,
-            production_steps=150_000,
-            equil_steps=25_000,
+            lj_lambdas=(self.lj_lambdas
+                        if len(self.lj_lambdas) <= len(SCREENING_LJ_LAMBDAS)
+                        else SCREENING_LJ_LAMBDAS),
+            coul_lambdas=(self.coul_lambdas
+                          if len(self.coul_lambdas) <= len(SCREENING_COUL_LAMBDAS)
+                          else SCREENING_COUL_LAMBDAS),
+            production_steps=min(self.production_steps, 150_000),
+            equil_steps=min(self.equil_steps, 25_000),
             n_morphologies=min(self.n_morphologies, 2),
             # The screening error bar is ~2x the production one by construction,
             # so holding it to the production precision budget would mark every

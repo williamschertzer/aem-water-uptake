@@ -359,6 +359,7 @@ def run_leg(
     seed: int,
     lammps_args: Sequence[str] = (),
     ranks: int = 1,
+    resume: bool = True,
 ) -> dict:
     """Sample every state of one leg, then build the matrix and estimate it.
 
@@ -377,6 +378,7 @@ def run_leg(
     from .ghost import scale_ghost_charges
     from .inputs import render_state_input
     from .rerun import build_energy_matrix
+    from .resume import state_complete
     from .estimators import bar_estimate, mbar_estimate, ti_from_state_dirs
 
     workdir = Path(workdir)
@@ -386,6 +388,8 @@ def run_leg(
 
     state_dirs: list[Path] = []
     state_systems: list = []
+    #: Indices sampled in *this* invocation, whose reruns are therefore stale.
+    resampled: list[int] = []
     for state in states:
         sdir = workdir / f"lam_{state.index:02d}"
         sdir.mkdir(parents=True, exist_ok=True)
@@ -410,10 +414,24 @@ def run_leg(
             constraints=constraints, comm_cutoff=comm_cutoff,
             data_file=str(state_data.resolve()), seed=seed + state.index,
         )
-        LOG.info("fep %s leg: sampling lambda=%.3f (%d/%d)",
-                 leg.value, state.lam, state.index + 1, len(states))
-        run_lammps(sdir / "in.fep", ranks=ranks, log_name="state.log",
-                   extra_args=lammps_args)
+        # The input is re-rendered above even when the window is complete: it is
+        # cheap, and it keeps the directory's inputs consistent with the code
+        # that would rerun it. Only the LAMMPS invocation is skipped.
+        if resume and state_complete(sdir):
+            LOG.info("fep %s leg: reusing lambda=%.3f (%d/%d)",
+                     leg.value, state.lam, state.index + 1, len(states))
+        else:
+            LOG.info("fep %s leg: sampling lambda=%.3f (%d/%d)",
+                     leg.value, state.lam, state.index + 1, len(states))
+            run_lammps(sdir / "in.fep", ranks=ranks, log_name="state.log",
+                       extra_args=lammps_args)
+            # rerun_j reads state j's trajectory, so a rerun left over from an
+            # earlier attempt at this window is now stale. LAMMPS is
+            # deterministic for a fixed input *and rank count*, so a window
+            # redone under different --ranks gives a different trajectory; the
+            # rerun's diagonal check would catch the mismatch, but as a hard
+            # error deep in the matrix build rather than here.
+            resampled.append(state.index)
         state_dirs.append(sdir)
 
     estimates: dict[str, LegEstimate] = {}
@@ -426,7 +444,7 @@ def run_leg(
         matrix = build_energy_matrix(
             ladder, state_dirs=state_dirs, systems=state_systems,
             ghost=ghost, config=config, workdir=workdir / "rerun",
-            lammps_args=lammps_args,
+            lammps_args=lammps_args, resume=resume, stale=tuple(resampled),
         )
         if "mbar" in wanted:
             estimates["mbar"] = mbar_estimate(matrix)
@@ -607,6 +625,7 @@ def run_bulk_campaign(
     n_waters: int,
     ranks: int = 1,
     lammps_args: Sequence[str] = (),
+    resume: bool = True,
 ) -> FEPEstimate:
     """Measure mu_ex of bulk water by FEP over independent morphologies.
 
@@ -622,6 +641,7 @@ def run_bulk_campaign(
     from ..lammps.inputs import GroupSpec, comm_cutoff, constraint_spec
     from ..lammps.writer import write_data_file
     from .ghost import add_ghost_water
+    from .resume import campaign_stamp, check_stamp, load_morphology, save_morphology
     from .schedule import LambdaLadder
 
     workdir = Path(workdir)
@@ -629,11 +649,29 @@ def run_bulk_campaign(
     spec = config.fep
     model = get_water_model(config.water_model)
 
+    check_stamp(
+        workdir / "campaign_stamp.json",
+        campaign_stamp(config, kind="bulk", n_waters=int(n_waters)),
+        resume=resume,
+    )
+
     morphologies: list[MorphologyEstimate] = []
     for index in range(spec.n_morphologies):
         seed = morphology_seed(spec.seed, index)
         mdir = workdir / f"morph{index:02d}"
         mdir.mkdir(parents=True, exist_ok=True)
+
+        # The coarsest checkpoint: a finished morphology is ~13 sampling runs
+        # plus a rerun pass of the same order, and its result is a single number
+        # with an error bar. Reloading it skips all of that.
+        checkpoint = mdir / "morphology.json"
+        if resume:
+            cached = load_morphology(checkpoint)
+            if cached is not None:
+                LOG.info("bulk morphology %d: reusing %.3f +/- %.3f kcal/mol",
+                         index, cached.mu_ex, cached.stderr)
+                morphologies.append(cached)
+                continue
 
         coords, edge = build_bulk_coordinates(n_waters, model, seed=seed)
         contents = CellContents(
@@ -659,7 +697,7 @@ def run_bulk_campaign(
                 leg, ladder=LambdaLadder(leg=leg, lambdas=lambdas),
                 system=system, ghost=ghost, config=config,
                 workdir=mdir / leg.value, seed=seed, ranks=ranks,
-                lammps_args=lammps_args, **shared,
+                lammps_args=lammps_args, resume=resume, **shared,
             )
             legs[leg.value] = select_reported(result["estimates"])
             for warning in estimator_disagreement(result["estimates"]):
@@ -669,6 +707,7 @@ def run_bulk_campaign(
         estimate = combine_legs_for_morphology(index, legs, workdir=mdir)
         LOG.info("bulk morphology %d: mu_ex = %.3f +/- %.3f kcal/mol",
                  index, estimate.mu_ex, estimate.stderr)
+        save_morphology(estimate, checkpoint)
         morphologies.append(estimate)
 
     return combine_morphologies(
@@ -682,6 +721,7 @@ def run_membrane_campaign(
     systems: Sequence,
     ranks: int = 1,
     lammps_args: Sequence[str] = (),
+    resume: bool = True,
 ) -> FEPEstimate:
     """Measure mu_ex of water inside the membrane by FEP over morphologies.
 
@@ -700,6 +740,13 @@ def run_membrane_campaign(
     """
     from ..lammps.inputs import GroupSpec, comm_cutoff, constraint_spec
     from .ghost import add_ghost_water
+    from .resume import (
+        campaign_stamp,
+        cell_fingerprint,
+        check_stamp,
+        load_morphology,
+        save_morphology,
+    )
     from .schedule import LambdaLadder
 
     workdir = Path(workdir)
@@ -738,6 +785,25 @@ def run_membrane_campaign(
         # The ghost is added per morphology rather than once, because it takes
         # new atom types and those depend on the cell's own type table.
         system, ghost = add_ghost_water(cell, model=model, seed=seed)
+
+        # Unlike the bulk path, the cell is the caller's and is not reproducible
+        # from the stamp, so it is fingerprinted per morphology. Without this a
+        # resumed uptake iteration would happily reuse the previous iteration's
+        # windows: same atom count, same types, different configuration.
+        checkpoint = mdir / "morphology.json"
+        check_stamp(
+            mdir / "cell_stamp.json",
+            campaign_stamp(config, kind="membrane", morphology=index,
+                           cell=cell_fingerprint(system)),
+            resume=resume,
+        )
+        if resume:
+            cached = load_morphology(checkpoint)
+            if cached is not None:
+                LOG.info("membrane morphology %d: reusing %.3f +/- %.3f kcal/mol",
+                         index, cached.mu_ex, cached.stderr)
+                morphologies.append(cached)
+                continue
         o_type, h_type = system.water_atom_types()
         # Counted off the *input* cell, before the ghost is added.
         # ``n_polymer_molecules`` counts residues that are neither water nor
@@ -767,7 +833,7 @@ def run_membrane_campaign(
                 leg, ladder=LambdaLadder(leg=leg, lambdas=lambdas),
                 system=system, ghost=ghost, config=config,
                 workdir=mdir / leg.value, seed=seed, ranks=ranks,
-                lammps_args=lammps_args, **shared,
+                lammps_args=lammps_args, resume=resume, **shared,
             )
             legs[leg.value] = select_reported(result["estimates"])
             for warning in estimator_disagreement(result["estimates"]):
@@ -777,6 +843,7 @@ def run_membrane_campaign(
         estimate = combine_legs_for_morphology(index, legs, workdir=mdir)
         LOG.info("membrane morphology %d: mu_ex = %.3f +/- %.3f kcal/mol",
                  index, estimate.mu_ex, estimate.stderr)
+        save_morphology(estimate, checkpoint)
         morphologies.append(estimate)
 
     return combine_morphologies(

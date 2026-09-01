@@ -295,6 +295,59 @@ def test_only_one_rerun_per_state(tmp_path, ghosted, cfg, ladder):
 
 
 @needs_lammps
+def test_resume_reuses_finished_reruns(tmp_path, ghosted, cfg, ladder, monkeypatch):
+    """A second matrix build over the same states runs no LAMMPS at all.
+
+    The reuse is safe because the diagonal check below re-validates every reused
+    rerun_j.dat against that state's own pe.dat on each build, so this asserts a
+    saving, not a shortcut around the guard.
+    """
+    _, ghost = ghosted
+    dirs, systems = _sample(ladder, ghosted, cfg, tmp_path)
+    rr = tmp_path / "rr"
+    shared = dict(state_dirs=dirs, systems=systems, ghost=ghost, config=cfg,
+                  workdir=rr)
+    first = build_energy_matrix(ladder, **shared)
+
+    calls = []
+    real_run = subprocess.run
+
+    def counting_run(*args, **kwargs):
+        calls.append(args)
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", counting_run)
+    second = build_energy_matrix(ladder, **shared)
+    assert calls == []
+    np.testing.assert_allclose(second.u_kn, first.u_kn)
+
+
+@needs_lammps
+def test_resampled_state_forces_its_rerun_to_be_redone(
+    tmp_path, ghosted, cfg, ladder
+):
+    """rerun_j describes state j's trajectory, so resampling j invalidates it.
+
+    Without the ``stale`` argument the reused rerun would be checked against a
+    trajectory that no longer exists and the diagonal check would abort the
+    build -- correct, but as a hard failure the user has to diagnose.
+    """
+    _, ghost = ghosted
+    dirs, systems = _sample(ladder, ghosted, cfg, tmp_path)
+    rr = tmp_path / "rr"
+    shared = dict(state_dirs=dirs, systems=systems, ghost=ghost, config=cfg,
+                  workdir=rr)
+    build_energy_matrix(ladder, **shared)
+
+    stale_index = 1
+    marker = (rr / f"rerun_{stale_index}.dat").stat().st_mtime_ns
+    matrix = build_energy_matrix(ladder, stale=(stale_index,), **shared)
+    # Rewritten, and the matrix still passes its own diagonal check.
+    assert (rr / f"rerun_{stale_index}.dat").stat().st_mtime_ns != marker
+    assert np.all(np.isfinite(matrix.u_kn))
+
+
+@needs_lammps
 def test_diagonal_check_catches_a_wrong_hamiltonian(
     tmp_path, ghosted, cfg, ladder, monkeypatch
 ):
@@ -342,3 +395,79 @@ def test_matrix_feeds_mbar(tmp_path, ghosted, cfg, ladder):
     # physically meaningful number, so only finiteness and sign are asserted:
     # growing a repulsive core into liquid water costs free energy.
     assert dg > 0
+
+
+def test_no_input_writer_hardcodes_a_bonded_style():
+    """The bonded styles must come from BONDED_STYLES, not be spelled out.
+
+    They are part of the Hamiltonian, and three separate places used to write
+    them out: the MD template, the FEP sampling template, and the reweighting
+    header built in rerun.py. They drifted -- the reweighting header omitted
+    dihedral_style and improper_style, which no bulk-water run could reveal
+    because SPC/E has neither, so the first polymer reweight failed on
+    read_data with "Must define dihedral_style before Dihedral Coeffs".
+
+    This asserts the *structural* fix rather than the symptom: a fourth
+    consumer that hardcodes the lines fails here even if it happens to get
+    today's values right, because the next style change would leave it behind.
+    """
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1] / "src" / "aemwater"
+    sources = [root / "fep" / "rerun.py",
+               root / "lammps" / "templates" / "common.in.j2",
+               root / "lammps" / "templates" / "fep_common.in.j2"]
+
+    literal = re.compile(
+        r"^[^#]*\b(bond_style|angle_style|dihedral_style|improper_style)\s+"
+        r"(harmonic|charmm|cvff|opls|class2|quadratic)\b", re.M)
+
+    offenders = []
+    for path in sources:
+        for match in literal.finditer(path.read_text()):
+            offenders.append(f"{path.name}: {match.group(0).strip()}")
+
+    assert not offenders, (
+        "bonded styles are hardcoded instead of read from "
+        "writer.BONDED_STYLES:\n  " + "\n  ".join(offenders))
+
+
+def test_the_shared_styles_cover_every_bonded_section_read_data_can_emit():
+    """A missing style is a read_data failure, so the set must be complete."""
+    from aemwater.lammps.writer import BONDED_STYLES
+
+    assert [name for name, _ in BONDED_STYLES] == [
+        "bond_style", "angle_style", "dihedral_style", "improper_style"]
+
+
+def test_the_rerun_input_emits_all_four_bonded_styles(
+    tmp_path, ghosted, cfg, ladder
+):
+    """The rendered text, not just the source -- read_data is what parses this.
+
+    Rendered from a water cell on purpose: the styles must be declared even
+    when the cell has no torsions, because the same writer serves both and the
+    polymer case is the one that fails without them.
+    """
+    import re
+
+    system, ghost = ghosted
+    states = ladder.states
+    write_rerun_input(
+        tmp_path / "styles.in",
+        source=states[0],
+        targets=list(states[1:]),
+        system=system,
+        ghost=ghost,
+        config=cfg,
+        data_file="state.data",
+        traj_file="traj.lammpstrj",
+        out_file="out.dat",
+        sample_every=cfg.fep.sample_every,
+    )
+    text = (tmp_path / "styles.in").read_text()
+    for style in ("bond_style", "angle_style", "dihedral_style",
+                  "improper_style"):
+        assert re.search(rf"^{style}\s+\S+", text, re.M), \
+            f"rendered rerun input has no {style}"

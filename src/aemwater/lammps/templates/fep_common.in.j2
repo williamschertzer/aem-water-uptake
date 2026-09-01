@@ -30,11 +30,8 @@ pair_style      lj/cut/coul/long/soft {{ fep.soft_core_n }} {{ fep.alpha_lj }} {
 # Arithmetic mixing for GAFF2, as elsewhere. No `tail yes` -- see header note 2.
 pair_modify     mix arithmetic
 kspace_style    pppm {{ fep.kspace_accuracy }}
-bond_style      harmonic
-angle_style     harmonic
-dihedral_style  charmm
-improper_style  cvff
-special_bonds   lj 0.0 0.0 0.5 coul 0.0 0.0 0.8333333333
+{% for line in bonded_styles %}{{ line }}
+{% endfor %}special_bonds   {{ special_bonds }}
 
 # Charges for this state are baked into the data file rather than scaled at
 # runtime: PPPM builds its grid at setup, and a per-state data file makes each

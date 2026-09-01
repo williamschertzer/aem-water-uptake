@@ -39,6 +39,30 @@ from ..utils import LOG
 #: Amber 1-4 scaling: LJ divided by 2.0, Coulomb by 1.2.
 SPECIAL_BONDS = "lj 0.0 0.0 0.5 coul 0.0 0.0 0.8333333333"
 
+#: The bonded styles, in read_data order. Justified in the module docstring.
+#:
+#: Shared rather than repeated because these lines define part of the
+#: Hamiltonian, and every consumer must declare the *same* one: the sampling
+#: input, the FEP sampling input, and the reweighting header all read data files
+#: written by this module. They were previously written out in each of the three
+#: places, and drifted -- the reweighting header omitted the dihedral and
+#: improper styles, which no bulk-water run could reveal because SPC/E has
+#: neither, and the first polymer reweight failed on read_data.
+#:
+#: Anything added here must reach all three consumers, which is what
+#: tests/test_fep_rerun.py checks.
+BONDED_STYLES = (
+    ("bond_style", "harmonic"),
+    ("angle_style", "harmonic"),
+    ("dihedral_style", "charmm"),
+    ("improper_style", "cvff"),
+)
+
+
+def bonded_style_lines(indent: int = 16) -> list[str]:
+    """The bonded style commands, column-aligned like the rest of the inputs."""
+    return [f"{name:<{indent}}{value}" for name, value in BONDED_STYLES]
+
 
 class LammpsWriteError(RuntimeError):
     """Raised when a structure cannot be expressed in the chosen LAMMPS styles."""

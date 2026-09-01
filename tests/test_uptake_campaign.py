@@ -155,7 +155,7 @@ def stubbed(monkeypatch):
     import aemwater.prepare as prepare
     import aemwater.uptake_campaign as campaign_mod
 
-    calls = {"seeds": [], "references": 0, "fep": []}
+    calls = {"seeds": [], "references": 0, "fep": [], "reference_resume": []}
 
     def fake_prepare(config, workdir):
         calls["seeds"].append(config.box.seed)
@@ -165,8 +165,12 @@ def stubbed(monkeypatch):
         )
         return types.SimpleNamespace(typed_chains=["chain"])
 
-    def fake_reference(config, workdir, ranks=None):
+    def fake_reference(config, workdir, ranks=None, resume=True):
+        # `resume` is recorded rather than absorbed by **kwargs: --force must
+        # reach the reference, and a stub that swallowed the argument would let
+        # that wiring rot while these tests kept passing.
         calls["references"] += 1
+        calls["reference_resume"].append(resume)
         estimate = types.SimpleNamespace(mu_ex=-6.83)
         return types.SimpleNamespace(
             mu_ex=estimate, sanity=lambda: [], settings=None, method="fep")
@@ -317,5 +321,16 @@ def test_force_rebuilds_even_when_a_checkpoint_exists(stubbed, tmp_path, monkeyp
 
     mod.run_uptake_campaign(_config(), tmp_path, n_morphologies=1)
     rebuilt.clear()
+    calls["reference_resume"].clear()
     mod.run_uptake_campaign(_config(), tmp_path, n_morphologies=1, resume=False)
     assert rebuilt == [True]
+
+    # ...and the same flag must reach the bulk reference. It is the most
+    # expensive stage and the one where reusing stale work is worst: a membrane
+    # recomputed under new settings against a cached reservoir measured under
+    # the old ones compares two protocols, and the saturation criterion is the
+    # difference between them.
+    assert calls["reference_resume"] == [False], (
+        "--force did not reach the bulk reference; it would be read from cache "
+        "while the membrane was recomputed"
+    )

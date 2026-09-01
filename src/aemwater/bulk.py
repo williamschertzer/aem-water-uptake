@@ -209,8 +209,16 @@ def run_bulk_reference_fep(
     workdir: Path | str,
     cache_dir: Path | str | None = None,
     ranks: int = 1,
+    resume: bool = True,
 ) -> BulkReference:
     """Bulk reference measured by alchemical FEP instead of Widom insertion.
+
+    ``resume=False`` bypasses the cache *and* forwards to the campaign, so
+    ``--force`` discards a stale reference rather than reading it back and
+    recomputing only the membrane against it. This is the most expensive single
+    stage in the pipeline, so it is also the one most likely to be interrupted:
+    a partially written cache is ignored (see ``read_json_or_none``) rather
+    than raising, and the campaign underneath resumes per lambda window.
 
     Returns the same :class:`BulkReference` the Widom path returns, so the driver
     consumes either without branching, with ``method="fep"`` recorded on it --
@@ -242,9 +250,12 @@ def run_bulk_reference_fep(
     cache.mkdir(parents=True, exist_ok=True)
     cache_file = cache / f"bulkfep_{fep_cache_key(settings, config.fep)}.json"
 
-    if cache_file.exists():
+    from .utils import read_json_or_none, write_json
+
+    payload = None if not resume else read_json_or_none(
+        cache_file, description="bulk FEP reference cache")
+    if payload is not None:
         LOG.info("bulk FEP reference: reusing cached result %s", cache_file.name)
-        payload = json.loads(cache_file.read_text())
         est = FEPEstimate(
             mu_ex=payload["mu_ex"],
             stderr=payload["stderr"],
@@ -271,6 +282,7 @@ def run_bulk_reference_fep(
     # already caught three real typos.
     fep_estimate = run_bulk_campaign(
         config, workdir, n_waters=settings.n_waters, ranks=ranks,
+        resume=resume,
     )
     write_campaign_report(fep_estimate, workdir / "fep_bulk.json")
     # Figures next to the numbers. Threshold forwarded so the drawn acceptance
@@ -282,7 +294,7 @@ def run_bulk_reference_fep(
 
     density, volume = _fep_cell_density(settings)
 
-    cache_file.write_text(json.dumps({
+    write_json(cache_file, {
         "mu_ex": fep_estimate.mu_ex,
         "stderr": fep_estimate.stderr,
         "n_morphologies": fep_estimate.n_morphologies,
@@ -292,7 +304,7 @@ def run_bulk_reference_fep(
         "per_morphology": [m.summary() for m in fep_estimate.per_morphology],
         "density": density,
         "volume": volume,
-    }, indent=2, default=float))
+    })
     LOG.info("bulk FEP reference: mu_ex = %.3f +/- %.3f kcal/mol (%d morphologies)",
              fep_estimate.mu_ex, fep_estimate.stderr,
              fep_estimate.n_morphologies)
@@ -332,6 +344,7 @@ def run_bulk_reference(
     cache_dir: Path | str | None = None,
     ranks: int = 1,
     lammps_binary: str = "lmp",
+    resume: bool = True,
 ) -> BulkReference:
     """Equilibrate bulk water and measure its excess chemical potential.
 
@@ -359,9 +372,12 @@ def run_bulk_reference(
     cache.mkdir(parents=True, exist_ok=True)
     cache_file = cache / f"bulk_{settings.key()}.json"
 
-    if cache_file.exists():
+    from .utils import read_json_or_none, write_json
+
+    payload = None if not resume else read_json_or_none(
+        cache_file, description="bulk reference cache")
+    if payload is not None:
         LOG.info("bulk reference: reusing cached result %s", cache_file.name)
-        payload = json.loads(cache_file.read_text())
         est = WidomEstimate(
             mu_ex=payload["mu_ex"],
             stderr=payload["stderr"],
@@ -464,21 +480,19 @@ def _run_bulk_stages(settings, workdir, cache_file, system, common, ranks):
     est = read_widom_file(workdir / "bulk_mu.dat", settings.temperature)
     ref = BulkReference(settings, est, density, volume, workdir)
 
-    cache_file.write_text(
-        json.dumps(
-            {
-                "mu_ex": est.mu_ex,
-                "stderr": est.stderr,
-                "n_blocks": est.n_blocks,
-                "block_values": est.block_values.tolist(),
-                "mean_boltzmann": est.mean_boltzmann,
-                "effective_samples": est.effective_samples,
-                "volume": volume,
-                "density": density,
-                "settings": asdict(settings),
-            },
-            indent=2,
-        )
+    write_json(
+        cache_file,
+        {
+            "mu_ex": est.mu_ex,
+            "stderr": est.stderr,
+            "n_blocks": est.n_blocks,
+            "block_values": est.block_values.tolist(),
+            "mean_boltzmann": est.mean_boltzmann,
+            "effective_samples": est.effective_samples,
+            "volume": volume,
+            "density": density,
+            "settings": asdict(settings),
+        },
     )
     for issue in ref.sanity():
         LOG.warning("bulk reference: %s", issue)

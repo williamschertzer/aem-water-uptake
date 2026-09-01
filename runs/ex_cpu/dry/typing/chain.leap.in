@@ -1,5 +1,0 @@
-source leaprc.gaff2
-loadamberparams /Users/william/Developments/aem-water-uptake/runs/ex_cpu/dry/typing/fragment/unit.frcmod
-m0 = loadmol2 /Users/william/Developments/aem-water-uptake/runs/ex_cpu/dry/typing/chain.mol2
-saveamberparm m0 chain.prmtop chain.inpcrd
-quit

@@ -1,5 +1,0 @@
-# Time-averaged data for fix rho
-# TimeStep v_dens v_vol
-5000 0.975433 15987.9
-10000 0.998009 15618
-15000 0.998762 15606.6

@@ -241,7 +241,8 @@ def run_uptake_campaign(
     # fail at the first attribute access.
     shared_reference = bulk_reference
     if shared_reference is None:
-        shared_reference = obtain_bulk_reference(loop_config, workdir / "bulk")
+        shared_reference = obtain_bulk_reference(loop_config, workdir / "bulk",
+                                                 resume=resume)
         for issue in shared_reference.sanity():
             LOG.warning("bulk reference: %s", issue)
 

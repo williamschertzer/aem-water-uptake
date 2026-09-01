@@ -222,3 +222,49 @@ def test_screening_preserves_the_alchemical_path():
     scr = prod.at_screening_resolution()
     for attr in ("soft_core_n", "alpha_lj", "alpha_coul", "kspace_accuracy"):
         assert getattr(scr, attr) == getattr(prod, attr)
+
+
+def test_screening_never_makes_a_cheap_config_more_expensive():
+    """A cost-reduction preset must never increase cost.
+
+    This was a real defect: the preset substituted 150k production steps and
+    the 7+7 screening ladders unconditionally, so a deliberately tiny
+    pipeline-smoke config (2k steps, 5+3 states) came back *more* expensive
+    per iteration than it asked for -- and because the driver applies the
+    preset internally, the configured value appeared to be ignored. It made a
+    fast end-to-end test of the full loop impossible to configure.
+    """
+    tiny = FEPSpec(
+        lj_lambdas=(0.0, 0.25, 0.5, 0.75, 1.0),
+        coul_lambdas=(0.0, 0.5, 1.0),
+        production_steps=2_000,
+        equil_steps=500,
+        # 2k steps at the default sample_every=1000 is 2 frames, which
+        # validate() rightly refuses -- MBAR cannot report an uncertainty from
+        # it. A smoke config has to buy its speed in steps, not in frames.
+        sample_every=100,
+        n_morphologies=1,
+    )
+    scr = tiny.at_screening_resolution()
+
+    assert scr.production_steps == 2_000
+    assert scr.equil_steps == 500
+    assert scr.lj_lambdas == tiny.lj_lambdas
+    assert scr.coul_lambdas == tiny.coul_lambdas
+
+    cost = lambda s: (
+        (len(s.lj_lambdas) + len(s.coul_lambdas))
+        * (s.production_steps + s.equil_steps)
+        * s.n_morphologies
+    )
+    assert cost(scr) <= cost(tiny)
+    scr.validate()
+
+
+def test_screening_still_reduces_a_production_config():
+    """The ceiling must not have turned the preset into a no-op."""
+    prod = FEPSpec()
+    scr = prod.at_screening_resolution()
+    assert len(scr.lj_lambdas) < len(prod.lj_lambdas)
+    assert scr.production_steps < prod.production_steps
+    assert scr.equil_steps < prod.equil_steps

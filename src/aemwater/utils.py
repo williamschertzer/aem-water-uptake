@@ -92,6 +92,37 @@ def read_json(path: os.PathLike | str) -> Any:
         return json.load(fh)
 
 
+def read_json_or_none(path: os.PathLike | str, *,
+                      description: str = "checkpoint") -> Any:
+    """Return parsed JSON, or ``None`` if the file is absent or unusable.
+
+    For files that are *caches and checkpoints* -- things whose contents can
+    always be recomputed. Corruption is deliberately treated as absence: the
+    alternative is that one truncated file makes every subsequent run fail
+    until someone deletes it by hand, with a traceback pointing at this reader
+    rather than at the kill that truncated it. The cost of ignoring the file is
+    CPU time; the cost of raising is a stuck pipeline.
+
+    Use ``read_json`` for inputs the caller cannot regenerate, where a
+    corrupt file should stop the run rather than be silently replaced.
+
+    Logged at WARNING because recomputing an expensive reference should not be
+    invisible just because it was the safe thing to do.
+    """
+    p = Path(path)
+    if not p.is_file():
+        return None
+    try:
+        with open(p) as fh:
+            return json.load(fh)
+    except (OSError, json.JSONDecodeError) as exc:
+        LOG.warning(
+            "%s %s is unreadable (%s); ignoring it and recomputing. "
+            "Delete it to silence this.", description, p, exc,
+        )
+        return None
+
+
 # -------------------------------------------------------------- statistics ---
 def block_average(values: Sequence[float], n_blocks: int = 5) -> tuple[float, float]:
     """Return (mean, standard error of the mean) from ``n_blocks`` blocks.

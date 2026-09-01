@@ -11,13 +11,10 @@ pair_style      lj/cut/coul/long {{ md.cutoff }} {{ md.cutoff }}
 # GEOMETRIC mixing, which silently changes every cross interaction.
 pair_modify     mix arithmetic tail yes
 kspace_style    pppm {{ md.kspace_accuracy }}
-bond_style      harmonic
-angle_style     harmonic
-dihedral_style  charmm
-improper_style  cvff
-# Amber 1-4 scaling: LJ/2 and Coulomb/1.2. Applied here, so every CHARMM
+{% for line in bonded_styles %}{{ line }}
+{% endfor %}# Amber 1-4 scaling: LJ/2 and Coulomb/1.2. Applied here, so every CHARMM
 # dihedral weight in the data file is 0.
-special_bonds   lj 0.0 0.0 0.5 coul 0.0 0.0 0.8333333333
+special_bonds   {{ special_bonds }}
 
 read_data       {{ data_file }}{% if extra_types %} extra/atom/types {{ extra_types.atom }} extra/bond/types {{ extra_types.bond }} extra/angle/types {{ extra_types.angle }}{% endif %}
 

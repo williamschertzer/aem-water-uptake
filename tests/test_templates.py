@@ -20,6 +20,7 @@ import pytest
 from jinja2 import Environment, FileSystemLoader, meta
 
 import aemwater
+from aemwater.lammps.inputs import _environment
 
 TEMPLATE_DIR = Path(aemwater.__file__).parent / "lammps" / "templates"
 
@@ -43,7 +44,13 @@ def _declared_variables() -> dict[str, set[str]]:
     env = Environment(loader=FileSystemLoader(str(TEMPLATE_DIR)))
     parsed = {path.name: env.parse(path.read_text())
               for path in TEMPLATE_DIR.glob("*.j2")}
-    declared = {name: meta.find_undeclared_variables(tree)
+    # Variables the render environment injects itself. A caller must not be
+    # asked to supply these -- the whole point of `_environment()` installing
+    # them as globals is that no caller gets to choose them: they are part of
+    # the Hamiltonian and must be identical in every input. Subtracted from the
+    # audit rather than special-cased per template, so a new global is covered.
+    injected = set(_environment().globals) - set(Environment().globals)
+    declared = {name: meta.find_undeclared_variables(tree) - injected
                 for name, tree in parsed.items()}
     for name, tree in parsed.items():
         for included in meta.find_referenced_templates(tree):

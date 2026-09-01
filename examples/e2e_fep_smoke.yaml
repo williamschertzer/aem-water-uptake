@@ -1,0 +1,104 @@
+# End-to-end pipeline test with FEP as the mu_ex backend.
+#
+# WHAT THIS IS FOR: proving the whole chain executes and the pieces agree ---
+# bulk water reference, dry membrane, hydration loop, saturation comparison,
+# report and figures. Every number it produces is physically meaningless: 2
+# chains of 5 monomers is not a membrane, 2k production steps per lambda is not
+# a converged free energy, and one morphology gives no between-morphology error
+# bar at all. Read it as "the pipeline ran and the comparison logic fired",
+# never as an uptake prediction.
+#
+# For a number you can defend, see examples/qa_polystyrene.yaml (QA scale) or
+# the production defaults in RunConfig (documented in README.md).
+
+polymer:
+  name: BTMA-PS-e2e
+  smiles: "[*]CC([*])c1ccc(C[N+](C)(C)C)cc1"
+  n_chains: 2
+  chain_length: 5
+  counterion: "Cl-"
+  terminal_group: "CH3"
+  # Gasteiger, not AM1-BCC: sqm on 2 chains costs more wall time than every
+  # MD stage below combined. Wrong charges, right code path.
+  charge_method: "gas"
+
+box:
+  initial_density: 0.25
+  target_density: 1.05
+  seed: 424242
+
+md:
+  temperature: 298.15
+  timestep: 1.0
+  cutoff: 9.0
+  soft_push_steps: 2000
+  anneal_steps: 4000
+  anneal_temperature: 500.0
+  compression_steps: 2000
+  dry_npt_steps: 10000
+  relax_npt_steps: 4000
+  thermo_every: 200
+  mpi_ranks: 4
+
+# All 21 stages run, scaled down, so the smoke test exercises the production
+# code path rather than a shorter alternative scheme. The convergence gate is
+# off: this cell is too small and too short to converge, and the point here is
+# that the pipeline executes end to end.
+equilibration:
+  scheme: "21step"
+  max_pressure: 50000.0
+  high_temperature: 500.0
+  time_scale: 0.01
+  final_npt_ps: 15.0
+  enforce_convergence: false
+
+insertion:
+  batch_size: 8
+  min_batch_size: 2
+  grid_spacing: 0.6
+  max_failed_batches: 2
+  # The loop will almost certainly hit this rather than a real saturation
+  # point. Hitting the iteration cap is the expected outcome, not a failure.
+  max_iterations: 6
+
+mu_ex_method: fep
+
+fep:
+  # M=1 gives no error bar. Acceptable only because this is a plumbing test;
+  # the campaign entry point is what measures morphology spread.
+  n_morphologies: 1
+  # Coarse ladders. Cheap enough to run, wide enough that neighbouring states
+  # will likely fail the min_overlap check -- which is itself worth seeing,
+  # since it proves the overlap diagnostic fires.
+  lj_lambdas: [0.0, 0.25, 0.5, 0.75, 1.0]
+  coul_lambdas: [0.0, 0.5, 1.0]
+  equil_steps: 500
+  production_steps: 2000
+  # 2000/100 = 20 frames, the floor MBAR needs. Speed is bought in steps, not
+  # in frames: fewer frames fails validation instead of running fast.
+  sample_every: 100
+  estimators: [mbar, bar, ti]
+  # Relaxed so nothing is flagged unconverged purely from the short run; the
+  # real budget is 0.30 (see README).
+  max_stderr: 5.0
+  min_overlap: 0.001
+  seed: 90210
+
+# Kept enabled so the run also produces a Widom number to eyeball beside the
+# FEP one. They will not agree at this length -- Widom needs ~1e6 insertions.
+widom:
+  enabled: true
+  n_blocks: 3
+  insertions_per_call: 200
+  steps_per_block: 2000
+  bulk_box_length: 22.0
+  bulk_equil_steps: 10000
+  # The bulk reference is cached and reused across runs, and the default
+  # (~/.cache/aemwater) is shared by every config on the machine. Keeping it
+  # inside the workdir makes this example self-contained -- a smoke-scale
+  # reservoir must not be picked up by a later production run, and deleting
+  # runs/e2e_fep_smoke must be enough to reset the whole test.
+  cache_dir: "runs/e2e_fep_smoke/bulk_cache"
+
+water_model: spce
+workdir: runs/e2e_fep_smoke
