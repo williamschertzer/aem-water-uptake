@@ -1,0 +1,70 @@
+# Benzyltrimethylammonium-functionalised polystyrene: the canonical AEM model
+# system. Production-scale settings -- expect hours on a small cluster.
+polymer:
+  name: PE
+  # Repeat unit with explicit backbone attachment points.
+  smiles: "[*]CC[*]"
+  n_chains: 50
+  chain_length: 100
+  counterion: "OH-"
+  terminal_group: "CH3"
+
+box:
+  initial_density: 0.02
+  target_density: 0.8
+  min_separation: 2.2
+  seed: 20260817
+
+md:
+  temperature: 300.0
+  pressure: 1.0
+  timestep: 1.0
+  cutoff: 10.0
+  soft_push_steps: 20000
+  anneal_steps: 50000
+  anneal_temperature: 600.0
+  compression_steps: 20000
+  dry_npt_steps: 200000
+  relax_npt_steps: 50000
+  dump_every: 1000
+  mpi_ranks: 4
+
+# Dry-membrane equilibration. The 21-step compression/decompression scheme
+# (Larsen, Lin & Colina, Macromolecules 44 (2011) 6944) replaces the single
+# squeeze-and-release cycle, which plateaued near 0.95 g/cm3 for this chemistry
+# -- ~18% below experiment -- with density still rising when the run ended. The
+# leftover volume is void space, and the uptake loop fills voids instead of
+# swelling the cell, which biases lambda high without bound.
+#
+# 1560 ps total at a 1 fs timestep, 800 ps of it the production NPT that the
+# density is averaged over. This dominates the cost of the dry stage.
+equilibration:
+  scheme: "21step"
+  max_pressure: 50000.0
+  high_temperature: 600.0
+  time_scale: 1.0
+  final_npt_ps: 800.0
+  # Refuse to hand an unconverged cell to the uptake loop.
+  enforce_convergence: true
+  # Experimental dry density, g/cm3.
+  expected_density: 0.8
+  density_tolerance: 0.5
+  drift_tolerance: 0.002
+
+insertion:
+  batch_fraction: 0.50
+  batch_size: 50
+  min_batch_size: 10
+  grid_spacing: 0.5
+  probe_radius: 1.4
+  max_failed_batches: 3
+  max_iterations: 60
+
+widom:
+  enabled: true
+  n_blocks: 5
+  insertions_per_call: 400
+  steps_per_block: 10000
+
+water_model: spce
+workdir: runs/btma_ps_n8_l20
