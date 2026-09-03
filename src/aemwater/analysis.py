@@ -190,42 +190,51 @@ def plot_uptake(result, path: Path | str, bulk_mu_ex: float | None = None):
     fig, axes = plt.subplots(2, 2, figsize=(9.0, 6.4))
     c_main, c_ref, c_alt = "#1f4e79", "#b04a3a", "#4a7c59"
 
+    # An uncharged composition has no lambda, so the loading axis becomes the
+    # mass uptake. Plotting an all-NaN lambda would leave three of four panels
+    # blank with no indication why.
+    charged = bool(df["lambda_value"].notna().any())
+    x_key = "lambda_value" if charged else "water_uptake_pct"
+    x_label = r"$\lambda$" if charged else "water uptake (wt %)"
+
     ax = axes[0, 0]
-    ax.plot(df["index"], df["lambda_value"], "o-", color=c_main, lw=1.6, ms=4)
+    ax.plot(df["index"], df[x_key], "o-", color=c_main, lw=1.6, ms=4)
     ax.set_xlabel("iteration")
-    ax.set_ylabel(r"$\lambda$ (H$_2$O per ionic group)")
+    ax.set_ylabel(r"$\lambda$ (H$_2$O per ionic group)" if charged
+                  else "water uptake (wt %)")
     ax.set_title("(a) water loading", loc="left", fontsize=10)
-    ax2 = ax.twinx()
-    ax2.plot(df["index"], df["water_uptake_pct"], alpha=0)
-    ax2.set_ylabel("water uptake (wt %)")
+    if charged:
+        ax2 = ax.twinx()
+        ax2.plot(df["index"], df["water_uptake_pct"], alpha=0)
+        ax2.set_ylabel("water uptake (wt %)")
 
     ax = axes[0, 1]
     ok = df["mu_ex"].notna()
-    ax.errorbar(df.loc[ok, "lambda_value"], df.loc[ok, "mu_ex"],
+    ax.errorbar(df.loc[ok, x_key], df.loc[ok, "mu_ex"],
                 yerr=df.loc[ok, "mu_ex_stderr"], fmt="o-", color=c_main,
                 lw=1.6, ms=4, capsize=3)
     if bulk_mu_ex is not None:
         ax.axhline(bulk_mu_ex, color=c_ref, ls="--", lw=1.4)
         ax.annotate("bulk water", xy=(0.98, bulk_mu_ex), xycoords=("axes fraction", "data"),
                     ha="right", va="bottom", color=c_ref, fontsize=8)
-    ax.set_xlabel(r"$\lambda$")
+    ax.set_xlabel(x_label)
     ax.set_ylabel(r"$\mu^{\mathrm{ex}}$ (kcal mol$^{-1}$)")
     ax.set_title("(b) saturation criterion", loc="left", fontsize=10)
 
     ax = axes[1, 0]
-    ax.plot(df["lambda_value"], df["density"], "o-", color=c_main, lw=1.6, ms=4)
-    ax.set_xlabel(r"$\lambda$")
+    ax.plot(df[x_key], df["density"], "o-", color=c_main, lw=1.6, ms=4)
+    ax.set_xlabel(x_label)
     ax.set_ylabel(r"density (g cm$^{-3}$)")
     ax.set_title("(c) swelling", loc="left", fontsize=10)
     ax2 = ax.twinx()
-    ax2.plot(df["lambda_value"], df["volume"], "s--", color=c_alt, lw=1.2, ms=3)
+    ax2.plot(df[x_key], df["volume"], "s--", color=c_alt, lw=1.2, ms=3)
     ax2.set_ylabel(r"volume ($\mathrm{\AA}^3$)", color=c_alt)
     ax2.tick_params(axis="y", colors=c_alt)
 
     ax = axes[1, 1]
-    ax.plot(df["lambda_value"], 100 * df["free_volume_fraction"], "o-",
+    ax.plot(df[x_key], 100 * df["free_volume_fraction"], "o-",
             color=c_main, lw=1.6, ms=4)
-    ax.set_xlabel(r"$\lambda$")
+    ax.set_xlabel(x_label)
     ax.set_ylabel("accessible free volume (%)")
     ax.set_title("(d) cavity filling", loc="left", fontsize=10)
 
@@ -236,8 +245,12 @@ def plot_uptake(result, path: Path | str, bulk_mu_ex: float | None = None):
     axes[1, 0].spines["right"].set_visible(True)
 
     fig.suptitle(
-        rf"$\lambda_\mathrm{{max}}$ = {result.lambda_value:.1f}, "
-        rf"{result.water_uptake_pct:.1f} wt % ({result.stop_reason.replace('_', ' ')})",
+        (rf"$\lambda_\mathrm{{max}}$ = {result.lambda_value:.1f}, "
+         rf"{result.water_uptake_pct:.1f} wt % "
+         rf"({result.stop_reason.replace('_', ' ')})") if charged else
+        (rf"{result.water_uptake_pct:.1f} wt % "
+         rf"({result.stop_reason.replace('_', ' ')}); "
+         r"uncharged, $\lambda$ undefined"),
         fontsize=11,
     )
     fig.tight_layout()
@@ -273,14 +286,35 @@ def _markdown_table(df) -> str:
                       *(line(r) for r in rows)])
 
 
+def _headline(result) -> str:
+    """The one-line result, in whichever conventions apply to this composition.
+
+    An uncharged composition has no ionic groups, so lambda does not exist for
+    it and quoting "lambda = nan" would read as a failed calculation rather than
+    an inapplicable convention. The mass uptake is the whole result there.
+    """
+    if not math.isfinite(result.lambda_value):
+        return (
+            f"**{result.water_uptake_pct:.1f} wt % water uptake**\n\n"
+            "> This composition has no ionic groups (IEC = 0), so the hydration\n"
+            "> number lambda is undefined and only the mass uptake is reported.\n"
+            "> The uptake measured here is the free-volume contribution alone --\n"
+            "> the hydrophobic baseline against which a functionalised membrane\n"
+            "> of the same backbone should be compared."
+        )
+    return (
+        f"**lambda = {result.lambda_value:.1f} H2O per ionic group** "
+        f"({result.water_uptake_pct:.1f} wt %)"
+    )
+
+
 def write_report(result, structure, path: Path | str) -> Path:
     """Markdown summary of the run: the number, how it was reached, caveats."""
     df = result.to_dataframe()
     lines = [
         "# Water uptake",
         "",
-        f"**lambda = {result.lambda_value:.1f} H2O per ionic group** "
-        f"({result.water_uptake_pct:.1f} wt %)",
+        _headline(result),
         "",
         f"- stop reason: `{result.stop_reason}`",
         f"- converged: **{result.converged}**",

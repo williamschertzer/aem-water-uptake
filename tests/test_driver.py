@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import math
 import pathlib
 
 import numpy as np
@@ -84,9 +85,43 @@ def test_lambda_is_waters_per_ionic_group():
     assert hydration_number(120, 8) == pytest.approx(15.0)
 
 
-def test_lambda_undefined_without_ionic_groups():
-    with pytest.raises(DriverError, match="ionic groups"):
-        hydration_number(10, 0)
+def test_lambda_is_nan_without_ionic_groups():
+    """An uncharged composition has no lambda, but it is not an error.
+
+    Polyethylene is a legitimate input -- the hydrophobic control that says how
+    much of a real AEM's uptake comes from the ionic groups rather than from
+    free volume. lambda = 0/0 is undefined for it, so this returns NaN and lets
+    the mass uptake and the saturation criterion (neither of which references
+    the ionic-group count) carry the result. Raising here discarded a completed
+    run over an inapplicable reporting convention.
+    """
+    assert math.isnan(hydration_number(10, 0))
+    assert math.isnan(hydration_number(0, 0))
+
+
+def test_lambda_agrees_with_the_composition_definition():
+    """The two lambda implementations must not disagree on any input.
+
+    `SystemComposition.lambda_from_n_water` returned NaN for an uncharged
+    composition while `hydration_number` raised on the same input; the run
+    reached the raising one after all the sampling had succeeded.
+    """
+    from aemwater.chemistry import build_composition
+
+    charged = build_composition(
+        "[*]CC([*])c1ccc(C[N+](C)(C)C)cc1", n_chains=2, chain_length=4)
+    neutral = build_composition("[*]CC([*])c1ccccc1", n_chains=2, chain_length=4)
+
+    for comp in (charged, neutral):
+        theirs = comp.lambda_from_n_water(40)
+        ours = hydration_number(40, comp.total_ionic_groups)
+        assert (math.isnan(theirs) and math.isnan(ours)) or theirs == ours
+
+
+def test_neutral_composition_still_has_a_mass_uptake():
+    """The measurement survives the undefined lambda."""
+    assert math.isnan(hydration_number(120, 0))
+    assert water_uptake_percent(120, 6895.8) > 0
 
 
 def test_mass_uptake_matches_the_definition():

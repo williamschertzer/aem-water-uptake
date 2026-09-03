@@ -103,6 +103,50 @@ def test_no_usable_morphology_raises_rather_than_returning_a_number():
         combine_uptake(camp, -6.8)
 
 
+def test_uncharged_morphologies_still_average():
+    """An undefined lambda must not disqualify a good wt %% measurement.
+
+    A neutral polymer has no IEC, so every morphology reports lambda = NaN. The
+    usability gate used to test lambda for finiteness, which made all of them
+    unusable and raised "no usable morphology" after the sampling had already
+    succeeded. The mass uptake is the measurement here and it averages normally;
+    only lambda comes back undefined.
+    """
+    camp = combine_uptake(
+        [_morph(0, 2.1, lam=float("nan")), _morph(1, 2.5, lam=float("nan"))],
+        -6.8,
+    )
+    assert camp.n_usable == 2
+    assert camp.water_uptake_pct == pytest.approx(2.3)
+    assert math.isnan(camp.lambda_value)
+    assert camp.summary()["lambda_waters_per_ionic_group"] is None
+
+
+def test_undefined_lambda_serialises_as_null_not_nan():
+    """`json.dumps` writes a bare `NaN`, which strict JSON readers reject.
+
+    These summaries land in result.json at the end of a multi-hour run, so an
+    unparseable file there is the whole run lost to a reporting detail.
+    """
+    import json
+
+    camp = combine_uptake(
+        [_morph(0, 2.1, lam=float("nan")), _morph(1, 2.5, lam=float("nan"))],
+        -6.8,
+    )
+    text = json.dumps(camp.summary())
+    assert "NaN" not in text
+    assert json.loads(text)["lambda_waters_per_ionic_group"] is None
+
+
+def test_a_genuinely_failed_morphology_is_still_excluded():
+    """Loosening the lambda gate must not let a failure through."""
+    camp = [_morph(0, float("nan"), lam=float("nan"), failure="boom"),
+            _morph(1, float("nan"), lam=float("nan"))]
+    with pytest.raises(UptakeCampaignError, match="no usable morphology"):
+        combine_uptake(camp, -6.8)
+
+
 def test_geometric_saturation_counts_as_usable():
     """Running out of cavities is a real endpoint, not a failure to converge."""
     camp = combine_uptake(

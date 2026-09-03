@@ -69,6 +69,7 @@ Three ways the loop can stop
 from __future__ import annotations
 
 import json
+import math
 import shutil
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
@@ -152,10 +153,32 @@ class UptakeResult:
     #: best, and that has to be visible in the saved state, not only in a log.
     dry_convergence: dict[str, object] | None = None
 
+    @property
+    def has_ionic_groups(self) -> bool:
+        """Whether lambda is defined for this composition.
+
+        Read from the composition record rather than from ``lambda_value``: a
+        NaN lambda and a zero IEC are the same condition here, but the
+        composition is the cause and reading the cause keeps the two reporting
+        paths from drifting apart again.
+        """
+        count = self.composition.get("total_ionic_groups")
+        return bool(count) if count is not None else math.isfinite(self.lambda_value)
+
     def summary(self) -> dict[str, object]:
         return {
             "n_waters": self.n_waters,
-            "lambda_waters_per_ionic_group": round(self.lambda_value, 3),
+            # None, not NaN: `json.dumps` writes a bare `NaN` literal, which no
+            # strict JSON reader will parse, and this dict is written to
+            # result.json at the end of a multi-hour run.
+            "lambda_waters_per_ionic_group": (
+                round(self.lambda_value, 3)
+                if math.isfinite(self.lambda_value) else None
+            ),
+            "lambda_undefined_reason": (
+                None if math.isfinite(self.lambda_value)
+                else "composition has no ionic groups (IEC = 0)"
+            ),
             "water_uptake_wt_pct": round(self.water_uptake_pct, 2),
             "hydrated_density_g_cm3": round(self.hydrated_density, 4),
             "dry_density_g_cm3": round(self.dry_density, 4),
@@ -176,7 +199,7 @@ class UptakeResult:
 
 def next_batch_size(
     n_current: int,
-    n_ionic_groups: int,
+    n_reference_sites: int,
     mu_gap: float | None,
     stderr: float,
     initial_fraction: float = 0.25,
@@ -192,12 +215,19 @@ def next_batch_size(
 
     ``mu_gap`` is mu_ex(membrane) - mu_ex(bulk); negative means water is still
     driven in. The first iteration has no measurement yet and gets a batch sized
-    from the ionic-group count, since roughly lambda ~ 1 is a safe first step.
+    from ``n_reference_sites``, since roughly one water per site is a safe first
+    step.
+
+    ``n_reference_sites`` is the ionic-group count for a charged membrane. It is
+    only a step-size scale, not part of any reported quantity, so an uncharged
+    composition passes a different site count (see :func:`run_uptake`) rather
+    than zero -- zero would collapse every batch to ``min_batch`` and make a
+    hydrophobic polymer take hundreds of iterations to reach the same endpoint.
     """
     if mu_gap is None:
-        return max(min_batch, min(max_batch, int(round(n_ionic_groups))))
+        return max(min_batch, min(max_batch, int(round(n_reference_sites))))
 
-    base = max(min_batch, int(round(initial_fraction * max(n_current, n_ionic_groups))))
+    base = max(min_batch, int(round(initial_fraction * max(n_current, n_reference_sites))))
     # Within a few sigma of the endpoint, take small steps: the cost of
     # overshooting is a wasted expensive iteration plus a blurred answer.
     scale = 1.0
@@ -216,9 +246,27 @@ def update_failed_batches(previous: int, requested: int, inserted: int) -> int:
 
 
 def hydration_number(n_waters: int, n_ionic_groups: int) -> float:
-    """lambda: waters per ionic group, the standard AEM hydration measure."""
+    """lambda: waters per ionic group, the standard AEM hydration measure.
+
+    Returns NaN for an uncharged composition rather than raising. A neutral
+    polymer (polyethylene, unfunctionalised polystyrene) has IEC = 0, so lambda
+    is 0/0 -- undefined, not erroneous. The *measurement* is unaffected: the
+    saturation criterion is a chemical-potential difference and the mass uptake
+    is 100 * m_water / m_dry, neither of which references the ionic-group count.
+    Raising here discarded a completed run because one of two reporting
+    conventions did not apply to it.
+
+    NaN, not zero: zero would claim the membrane takes up no water per ionic
+    group, which is a measurement, and it would average into a campaign mean
+    and pull it toward a number that means nothing. NaN propagates and is
+    excluded explicitly wherever lambda is reported.
+
+    This matches :meth:`aemwater.chemistry.SystemComposition.lambda_from_n_water`,
+    which has always returned NaN for the same input; the two disagreeing was
+    the actual defect.
+    """
     if n_ionic_groups <= 0:
-        raise DriverError("composition has no ionic groups; lambda is undefined")
+        return float("nan")
     return n_waters / n_ionic_groups
 
 
@@ -661,6 +709,26 @@ def run_uptake(
     n_ionic = comp.total_ionic_groups
     dry_mass = comp.dry_molar_mass
 
+    # An uncharged composition (polyethylene, unfunctionalised polystyrene) is a
+    # legitimate input -- it is the hydrophobic control that says how much of a
+    # real AEM's uptake comes from the ionic groups rather than from free
+    # volume. It has no IEC, so lambda is undefined and only the mass uptake is
+    # reported; that is handled at the reporting sites.
+    #
+    # The batch-size scale still needs a number. Repeat units stand in for ionic
+    # groups: it keeps the first batch and the swelling steps on the same scale
+    # as a charged run of the same size, so the two are comparable in cost and
+    # in how finely they approach saturation.
+    n_batch_sites = n_ionic if n_ionic > 0 else comp.n_chains * comp.chain_length
+    if n_ionic == 0:
+        LOG.warning(
+            "composition has no ionic groups (IEC = 0): lambda is undefined and "
+            "will be reported as null. The saturation criterion and the mass "
+            "uptake (wt %%) are unaffected. Sizing insertion batches from %d "
+            "repeat units instead.",
+            n_batch_sites,
+        )
+
     # --- the reservoir -----------------------------------------------------
     bulk_settings = bulk_settings_for(config)
     if bulk_reference is None:
@@ -744,7 +812,7 @@ def run_uptake(
     for step in range(start_step, config.insertion.max_iterations):
         t0 = time.time()
         n_add = next_batch_size(
-            n_waters, n_ionic, mu_gap, stderr,
+            n_waters, n_batch_sites, mu_gap, stderr,
             initial_fraction=config.insertion.batch_fraction,
             min_batch=config.insertion.min_batch_size,
             max_batch=config.insertion.batch_size,
@@ -849,8 +917,11 @@ def run_uptake(
     return UptakeResult(
         iterations=iterations,
         n_waters=n_waters,
-        lambda_value=hydration_number(n_waters, n_ionic) if n_waters else 0.0,
-        water_uptake_pct=water_uptake_percent(n_waters, dry_mass) if n_waters else 0.0,
+        # No `if n_waters` guard: hydration_number(0, n>0) is already 0.0, and
+        # for an uncharged composition the guard was the one path that returned
+        # a hard 0.0 for an undefined lambda.
+        lambda_value=hydration_number(n_waters, n_ionic),
+        water_uptake_pct=water_uptake_percent(n_waters, dry_mass),
         hydrated_density=final.density if final else dry_density,
         dry_density=dry_density,
         stop_reason=stop_reason,

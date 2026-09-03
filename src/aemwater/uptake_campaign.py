@@ -69,10 +69,16 @@ class MorphologyUptake:
         saturation, so its water content is a lower bound rather than a
         measurement, and averaging it in would bias the campaign low without
         any indication in the error bar.
+
+        Usability is judged on the mass uptake, not on lambda. An uncharged
+        composition has no IEC, so its lambda is NaN by definition while its
+        wt %% uptake is a perfectly good measurement; gating on lambda made
+        every morphology of a neutral polymer unusable and failed the campaign
+        with "no usable morphology" after all the sampling had succeeded.
         """
         if self.failure is not None:
             return False
-        if not math.isfinite(self.lambda_value):
+        if not math.isfinite(self.water_uptake_pct):
             return False
         return self.stop_reason != "max_iterations"
 
@@ -81,7 +87,12 @@ class MorphologyUptake:
             "index": self.index,
             "seed": self.seed,
             "n_waters": self.n_waters,
-            "lambda_waters_per_ionic_group": round(self.lambda_value, 3),
+            # None rather than NaN: these summaries are serialised with
+            # json.dumps, which emits an unparseable bare `NaN`.
+            "lambda_waters_per_ionic_group": (
+                round(self.lambda_value, 3)
+                if math.isfinite(self.lambda_value) else None
+            ),
             "water_uptake_wt_pct": round(self.water_uptake_pct, 2),
             "hydrated_density_g_cm3": round(self.hydrated_density, 4),
             "stop_reason": self.stop_reason,
@@ -138,8 +149,14 @@ class UptakeCampaign:
                 None if not math.isfinite(lo) else round(lo, 2),
                 None if not math.isfinite(hi) else round(hi, 2),
             ],
-            "lambda_waters_per_ionic_group": round(self.lambda_value, 3),
-            "lambda_stderr": round(self.lambda_stderr, 3),
+            "lambda_waters_per_ionic_group": (
+                round(self.lambda_value, 3)
+                if math.isfinite(self.lambda_value) else None
+            ),
+            "lambda_stderr": (
+                round(self.lambda_stderr, 3)
+                if math.isfinite(self.lambda_stderr) else None
+            ),
             "bulk_mu_ex_kcal_mol": round(self.bulk_mu_ex, 3),
             "n_morphologies_usable": self.n_usable,
             "n_morphologies_run": len(self.per_morphology),
@@ -372,7 +389,11 @@ def combine_uptake(
         workdir=Path(workdir),
         diagnostics={
             "water_uptake_per_morphology": [float(x) for x in pct],
-            "lambda_per_morphology": [float(x) for x in lam],
+            # None for an uncharged composition, for the same JSON-validity
+            # reason as the summary fields above.
+            "lambda_per_morphology": [
+                float(x) if math.isfinite(x) else None for x in lam
+            ],
             "spread_wt_pct": float(pct.max() - pct.min()),
             "n_unusable": len(morphologies) - m_count,
             "stop_reasons": sorted({m.stop_reason for m in usable}),
