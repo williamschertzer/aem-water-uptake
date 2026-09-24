@@ -39,13 +39,8 @@ import parmed as pmd
 
 from ..forcefield.builders import water_structure
 from ..forcefield.water import WaterModel, water_model
-from ..lammps.writer import LammpsSystem, LammpsWriteError
+from ..lammps.writer import GHOST_RESIDUE, LammpsSystem, LammpsWriteError
 from ..utils import LOG
-
-#: Residue name for the ghost. Distinct from ``WAT`` so that SHAKE grouping,
-#: group definitions and the water-type lookup in the writer continue to see
-#: only the real waters, and so a ghost can never be counted as uptake.
-GHOST_RESIDUE = "GHO"
 
 #: Suffix appended to the water atom type names to make the ghost's own types.
 GHOST_SUFFIX = "_G"

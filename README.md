@@ -52,10 +52,9 @@ only if the systematics cancel.
 
 ### Two other ways the loop can stop
 
-* **Geometric saturation** — no cavity in the current configuration can accept
-  another water. In a tightly crosslinked membrane this can be the physical
-  answer; more often it means the batch is too large for the free volume that
-  remains.
+* **Insertion stalled** — repeated attempts insert zero waters. This stops
+  unconverged; it does not establish thermodynamic saturation. Partial batches
+  count as progress and reduce the next requested batch size.
 * **Iteration budget exhausted** — reported as `converged: false`. The uptake
   is then a *lower bound*, not a measurement. A number produced by running out
   of iterations is not an answer, and the package does not present it as one.
@@ -208,11 +207,14 @@ the mean uptake with a between-morphology standard error and a Student-t 95%
 interval. Use it for anything you intend to quote; use `run` to inspect a single
 trajectory.
 
-Per-iteration `mu_ex` runs at screening resolution (7+7 lambda states, 150k
-steps per state) which is 6.4x cheaper than production resolution, so three
-screening trajectories cost less than one production trajectory. The saturation
-point is where two curves cross, and a crossing does not move with the third
-decimal of either curve. Pass `--production-resolution` to disable this.
+`aemwater run` uses the configured FEP lambda ladders, equilibration and
+production steps, sampling interval, and precision thresholds at every iteration.
+Each iteration measures one cell; independent replication requires `campaign`.
+
+`aemwater campaign` defaults to cheaper screening settings (at most 7+7 lambda
+states, 25k equilibration steps, and 150k production steps per state). Pass
+`--production-resolution` to use your configured FEP settings unchanged.
+Each trajectory saves its effective configuration beside its outputs.
 
 Trajectories that never saturated are excluded from the average — their water
 content is a lower bound, and averaging it in would bias the result low without
@@ -344,15 +346,46 @@ type table.
 
 | file | contents |
 |---|---|
+| `run_config.yaml` | fully resolved configuration, including CLI overrides |
+| `dry/typed_chain.pkl` | parameterized ParmEd polymer checkpoint for AmberTools-free resume |
 | `result.json` | the answer: lambda, wt %, densities, stop reason, convergence |
 | `uptake_trajectory.csv` | per-iteration water count, density, volume, mu_ex, gap |
 | `uptake.png` | loading curve, saturation criterion, swelling, cavity filling |
 | `report.md` | narrative summary including hydration structure |
 | `iter_NNN/` | the LAMMPS inputs, logs and data files for each iteration |
 
+For FEP uptake runs, iteration 0 is the baseline equilibrated dry membrane at
+zero water loading. Insertion cycles begin at iteration 1, so
+`insertion.max_iterations` still counts actual insertion attempts rather than
+the additional baseline measurement.
+
+Independent FEP lambda windows can share a node allocation:
+
+```yaml
+fep:
+  max_parallel_states: 8
+  ranks_per_state: 2
+```
+
+This permits at most eight simultaneous LAMMPS processes with two MPI ranks
+each. Request at least 16 CPU cores from the scheduler; excess workers do not
+create CPU resources and oversubscription usually makes the campaign slower.
+
 Structural analysis reports whether the absorbed water forms a **percolating**
 network or isolated pockets — two membranes with the same uptake can differ
 entirely in this respect, and hydroxide conduction needs a connected path.
+
+For a compact two-panel convergence view of an existing run:
+
+```bash
+python scripts/analyze_uptake_run.py runs/my_run
+```
+
+This writes `runs/my_run/uptake_analysis.png`. The left panel compares the
+per-iteration excess chemical potential with the bulk-water reference; the
+right panel shows uptake and labels every point with its number of water atoms.
+Use `--water-mu VALUE` to supply the reference when plotting an unfinished run
+that does not yet have a `result.json`.
 
 ---
 
@@ -433,3 +466,6 @@ src/aemwater/
   analysis.py     clustering, percolation, figures, report
   cli.py          prepare / bulk / run
 ```
+
+For replicated Im-PEEK runs and sampling sensitivity checks, see
+[the saturation validation workflow](docs/im_peek_saturation.md).

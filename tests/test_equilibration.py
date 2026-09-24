@@ -13,7 +13,20 @@ import numpy as np
 import pytest
 
 from aemwater.config import PolymerSpec, RunConfig
-from aemwater.prepare import check_dry_convergence
+from aemwater.prepare import _load_typed_chain, _save_typed_chain, check_dry_convergence
+
+
+def test_parameterized_chain_checkpoint_roundtrips(tmp_path):
+    """Resume can restore the Python-side topology without invoking AmberTools."""
+    import types
+
+    original = types.SimpleNamespace(atoms=[1, 2, 3], coordinates=[[0.0, 1.0, 2.0]])
+    path = _save_typed_chain(original, tmp_path / "typed_chain.pkl")
+    restored = _load_typed_chain(path)
+
+    assert restored.atoms == original.atoms
+    assert restored.coordinates == original.coordinates
+    assert not (tmp_path / "typed_chain.pkl.tmp").exists()
 
 
 def _config(expected=1.10, **equil_overrides):

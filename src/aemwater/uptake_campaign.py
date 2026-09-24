@@ -33,6 +33,7 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import dataclass, field
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Sequence
 
@@ -80,7 +81,7 @@ class MorphologyUptake:
             return False
         if not math.isfinite(self.water_uptake_pct):
             return False
-        return self.stop_reason != "max_iterations"
+        return self.converged and self.stop_reason in {"thermodynamic_saturation", "saturated"}
 
     def summary(self) -> dict[str, object]:
         return {
@@ -158,6 +159,7 @@ class UptakeCampaign:
                 if math.isfinite(self.lambda_stderr) else None
             ),
             "bulk_mu_ex_kcal_mol": round(self.bulk_mu_ex, 3),
+            "all_morphologies_saturated": (self.n_usable == len(self.per_morphology)),
             "n_morphologies_usable": self.n_usable,
             "n_morphologies_run": len(self.per_morphology),
             "per_morphology": [m.summary() for m in self.per_morphology],
@@ -187,6 +189,8 @@ def run_uptake_campaign(
     bulk_reference=None,
     resume: bool = True,
     screening: bool = True,
+    parallel_morphologies: int = 1,
+    first_morphology_seed: int | None = None,
 ) -> UptakeCampaign:
     """Run the uptake loop once per morphology and average the endpoints.
 
@@ -206,6 +210,10 @@ def run_uptake_campaign(
     saturation point is decided by a curve crossing rather than by the third
     decimal of any single mu_ex.
 
+    ``parallel_morphologies`` bounds concurrent trajectories; each retains its
+    own ``fep.max_parallel_states`` limit. ``first_morphology_seed`` records the
+    original seed when a prebuilt dry membrane is supplied in morph00/dry.
+
     Each morphology gets its own subdirectory and its own checkpoint, so a
     campaign interrupted after two of three trajectories resumes into the third
     rather than restarting.
@@ -221,6 +229,13 @@ def run_uptake_campaign(
         raise UptakeCampaignError(
             f"n_morphologies must be >= 1, got {m_count}"
         )
+    if parallel_morphologies < 1:
+        raise UptakeCampaignError("parallel_morphologies must be >= 1")
+    seeds = [morphology_box_seed(config.box.seed, i) for i in range(m_count)]
+    if first_morphology_seed is not None:
+        seeds[0] = first_morphology_seed
+    if len(set(seeds)) != m_count:
+        raise UptakeCampaignError("morphology packing seeds must be distinct")
     if m_count == 1:
         LOG.warning(
             "uptake campaign with one morphology: the result will carry no "
@@ -263,16 +278,21 @@ def run_uptake_campaign(
         for issue in shared_reference.sanity():
             LOG.warning("bulk reference: %s", issue)
 
-    results: list[MorphologyUptake] = []
+    if not shared_reference.mu_ex.converged:
+        raise UptakeCampaignError("bulk reference is unconverged; improve its sampling "
+                                  "or replication before preparing membrane trajectories")
 
-    for index in range(m_count):
-        seed = morphology_box_seed(config.box.seed, index)
+    def run_one(index: int) -> MorphologyUptake:
+        seed = seeds[index]
         mdir = workdir / f"morph{index:02d}"
         mdir.mkdir(parents=True, exist_ok=True)
         # Independent packing: the box seed is what decides where the chains go,
         # so this is the line that makes the morphologies genuinely different
         # rather than differently-perturbed copies of one packing.
-        mconfig = loop_config.with_overrides(**{"box.seed": seed})
+        mconfig = loop_config.with_overrides(**{"box.seed": seed, "workdir": str(mdir)})
+        # Each morphology is a run in its own right. Record its actual packing
+        # seed and screening/production FEP resolution beside its outputs.
+        mconfig.dump_yaml(mdir / "run_config.yaml")
 
         LOG.info("uptake campaign: morphology %d/%d (box seed %d) in %s",
                  index + 1, m_count, seed, mdir)
@@ -292,7 +312,9 @@ def run_uptake_campaign(
                 mconfig, mdir, typed_chains,
                 bulk_reference=shared_reference, resume=resume,
             )
-            results.append(MorphologyUptake(
+            uptake.to_dataframe().to_csv(mdir / "uptake_trajectory.csv", index=False)
+            (mdir / "result.json").write_text(json.dumps(uptake.summary(), indent=2))
+            return MorphologyUptake(
                 index=index, seed=seed, workdir=mdir,
                 n_waters=uptake.n_waters,
                 lambda_value=uptake.lambda_value,
@@ -301,21 +323,33 @@ def run_uptake_campaign(
                 stop_reason=uptake.stop_reason,
                 converged=uptake.converged,
                 n_iterations=len(uptake.iterations),
-            ))
+            )
         except Exception as exc:  # noqa: BLE001 - recorded, not swallowed
             # One packing that fails to equilibrate or crashes LAMMPS must not
             # discard the trajectories that succeeded. The failure is recorded
             # per morphology, excluded from the average, and reported.
             LOG.error("uptake campaign: morphology %d failed: %s", index, exc)
-            results.append(MorphologyUptake(
+            return MorphologyUptake(
                 index=index, seed=seed, workdir=mdir, n_waters=0,
                 lambda_value=float("nan"), water_uptake_pct=float("nan"),
                 hydrated_density=float("nan"), stop_reason="failed",
                 converged=False, n_iterations=0, failure=f"{type(exc).__name__}: {exc}",
-            ))
+            )
+
+    workers = min(parallel_morphologies, m_count)
+    LOG.info("uptake campaign: running up to %d morphologies concurrently "
+             "(up to %d concurrent FEP states)", workers,
+             workers * loop_config.fep.max_parallel_states)
+    if workers == 1:
+        results = [run_one(index) for index in range(m_count)]
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            results = list(pool.map(run_one, range(m_count)))
 
     # BulkReference.mu_ex is an estimate object, not a float; the scalar lives
     # one level in. Same convention as UptakeResult.bulk_mu_ex.
+    (workdir / "morphology_results.json").write_text(json.dumps(
+        [m.summary() for m in results], indent=2))
     campaign = combine_uptake(
         results,
         bulk_mu_ex=(float(shared_reference.mu_ex.mu_ex)

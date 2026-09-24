@@ -28,25 +28,18 @@ def test_fep_is_the_default_membrane_estimator():
     assert RunConfig(polymer=PolymerSpec(smiles="CC")).mu_ex_method == "fep"
 
 
-def test_screening_spec_is_forced_to_one_cell():
-    # run_membrane_campaign refuses fewer cells than fep.n_morphologies, and the
-    # loop has exactly one. Forcing the spec is what makes the two agree; the
-    # between-morphology term comes from replicating the loop instead.
-    cfg = _config("fep")
-    spec = replace(cfg.fep.at_screening_resolution(), n_morphologies=1)
-    assert spec.n_morphologies == 1
-    # only the sampling is reduced -- the Hamiltonian must be untouched
-    assert spec.soft_core_n == cfg.fep.soft_core_n
-    assert spec.alpha_lj == cfg.fep.alpha_lj
-    assert spec.kspace_accuracy == cfg.fep.kspace_accuracy
-
-
 def test_widom_method_still_reads_the_insertion_file():
     cfg = _config("widom")
     assert cfg.mu_ex_method == "widom"
     assert cfg.widom.enabled, "widom method with sampling off would measure nothing"
 
-def test_helper_forces_one_cell_and_reports(tmp_path, monkeypatch):
+
+@pytest.mark.parametrize("production_steps,equil_steps,n_states", [
+    (500_000, 50_000, 11),
+    (2_000, 1_000, 3),
+])
+def test_helper_preserves_configured_fep_settings(
+        tmp_path, monkeypatch, production_steps, equil_steps, n_states):
     """The helper must hand run_membrane_campaign exactly one cell, with a spec
     whose n_morphologies matches, and write a per-iteration report."""
     seen = {}
@@ -61,7 +54,7 @@ def test_helper_forces_one_cell_and_reports(tmp_path, monkeypatch):
     def fake_campaign(cfg, workdir, systems, ranks=1, **kw):
         seen["n_cells"] = len(systems)
         seen["n_morphologies"] = cfg.fep.n_morphologies
-        seen["states"] = len(cfg.fep.lj_lambdas)
+        seen["spec"] = cfg.fep
         return _Est()
 
     monkeypatch.setattr("aemwater.fep.campaign.run_membrane_campaign",
@@ -69,7 +62,14 @@ def test_helper_forces_one_cell_and_reports(tmp_path, monkeypatch):
     monkeypatch.setattr("aemwater.assembly.assemble",
                         lambda *a, **k: object())
 
-    cfg = _config("fep")
+    cfg = _config("fep").with_overrides(**{
+        "fep.lj_lambdas": [i / (n_states - 1) for i in range(n_states)],
+        "fep.coul_lambdas": [i / (n_states - 1) for i in range(n_states)],
+        "fep.production_steps": production_steps,
+        "fep.equil_steps": equil_steps,
+        "fep.sample_every": 100,
+        "fep.max_stderr": 0.2,
+    })
     est = driver._membrane_mu_ex_fep(cfg, tmp_path, object(), None, 30.0, 3)
 
     assert est.mu_ex == pytest.approx(-6.41)
@@ -77,8 +77,9 @@ def test_helper_forces_one_cell_and_reports(tmp_path, monkeypatch):
     # the check inside run_membrane_campaign compares these two; a mismatch is
     # the CampaignError that would abort every iteration.
     assert seen["n_morphologies"] == seen["n_cells"]
-    # screening resolution, not production
-    assert seen["states"] == len(cfg.fep.at_screening_resolution().lj_lambdas)
+    # All user settings survive dispatch, including ladders, step counts and
+    # strict precision thresholds; only the single-cell count is specialized.
+    assert seen["spec"] == replace(cfg.fep, n_morphologies=1)
     assert (tmp_path / "fep_membrane.json").exists()
 
 

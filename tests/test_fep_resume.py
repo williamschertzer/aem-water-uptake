@@ -348,6 +348,49 @@ def test_no_resume_recomputes_everything(tmp_path, monkeypatch, ti_config):
     assert len(calls) == 10
 
 
+def test_lambda_states_run_concurrently_with_per_state_ranks(
+    tmp_path, monkeypatch, ti_config,
+):
+    """The pool bounds concurrent windows and forwards ranks per state."""
+    import threading
+    import time
+
+    from aemwater.fep import campaign as campaign_module
+
+    config = ti_config.with_overrides(**{
+        "fep.n_morphologies": 1,
+        "fep.max_parallel_states": 3,
+        "fep.ranks_per_state": 2,
+    })
+    calls: list[str] = []
+    base = _fake_lammps(calls)
+    lock = threading.Lock()
+    active = 0
+    maximum = 0
+    seen_ranks: list[int] = []
+
+    def concurrent_fake(*args, **kwargs):
+        nonlocal active, maximum
+        with lock:
+            active += 1
+            maximum = max(maximum, active)
+            seen_ranks.append(kwargs.get("ranks", 1))
+        try:
+            time.sleep(0.03)
+            return base(*args, **kwargs)
+        finally:
+            with lock:
+                active -= 1
+
+    monkeypatch.setattr("aemwater.lammps.runner.run_lammps", concurrent_fake)
+    campaign_module.run_bulk_campaign(
+        config=config, workdir=tmp_path / "run", n_waters=64,
+    )
+
+    assert maximum == 3
+    assert seen_ranks and set(seen_ranks) == {2}
+
+
 def test_resume_into_a_directory_with_different_settings_refuses(
     tmp_path, monkeypatch, ti_config,
 ):
@@ -364,3 +407,16 @@ def test_resume_into_a_directory_with_different_settings_refuses(
         campaign_module.run_bulk_campaign(
             config=longer, workdir=tmp_path / "run", n_waters=64,
         )
+
+
+def test_resume_rejects_old_charge_convention(tmp_path):
+    current = campaign_stamp(_config(), kind="membrane")
+    old = dict(current)
+    old.pop("charge_convention")
+    path = tmp_path / "campaign_stamp.json"
+    path.write_text(json.dumps(old))
+    with pytest.raises(StampMismatch, match="charge_convention"):
+        check_stamp(path, current, resume=True)
+    assert json.loads(path.read_text()) == old
+    check_stamp(path, current, resume=False)
+    assert json.loads(path.read_text()) == current

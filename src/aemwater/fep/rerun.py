@@ -32,6 +32,7 @@ Two properties of the rerun pass are load-bearing and are asserted, not assumed:
 from __future__ import annotations
 
 import re
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
@@ -260,6 +261,7 @@ def build_energy_matrix(
     workdir: Path,
     data_file: str | Path | None = None,
     lammps_args: Sequence[str] = (),
+    ranks: int = 1,
     resume: bool = True,
     stale: Sequence[int] = (),
 ) -> EnergyMatrix:
@@ -292,9 +294,12 @@ def build_energy_matrix(
     kT = 0.0019872041 * config.md.temperature
     workdir.mkdir(parents=True, exist_ok=True)
 
-    rows: list[np.ndarray] = []
-    counts: list[int] = []
-    for j, (state, sdir, system) in enumerate(zip(states, state_dirs, systems)):
+    state_ranks = (config.fep.ranks_per_state
+                   if config.fep.ranks_per_state is not None else ranks)
+    stale_indices = set(stale)
+
+    def rerun_one(item) -> tuple[np.ndarray, int]:
+        j, (state, sdir, system) = item
         sampled = _read_two_column(sdir / "pe.dat")
         targets = [s for s in states if s.index != state.index]
         out = f"rerun_{j}.dat"
@@ -315,13 +320,14 @@ def build_energy_matrix(
         # recomputes against this state's pe.dat every time the matrix is built,
         # so a stale or mismatched rerun_j.dat fails there rather than passing
         # silently. That is what makes skipping the invocation safe.
-        if resume and j not in set(stale) and rerun_complete(workdir, j):
+        if resume and j not in stale_indices and rerun_complete(workdir, j):
             LOG.info("fep rerun: reusing pass %d/%d", j + 1, len(states))
         else:
             run_lammps(
                 workdir / f"rerun_{j}.in",
                 workdir=workdir,
                 log_name=f"rerun_{j}.log",
+                ranks=state_ranks,
                 extra_args=list(lammps_args) or None,
             )
         table = _read_two_column(workdir / out)
@@ -350,14 +356,28 @@ def build_energy_matrix(
         LOG.debug("%s diagonal reproduced to %.2e kcal/mol", state.label, drift)
 
         n = table.shape[0]
-        counts.append(n)
         # Column block for samples from state j: u[k, n] = (U_j + dU_{j->k}) / kT
         block = np.empty((len(states), n))
         block[state.index] = table[:, 1] / kT
         for col, target in enumerate(targets):
             block[target.index] = (table[:, 1] + table[:, 2 + col]) / kT
-        rows.append(block)
+        return block, n
 
+    workers = min(config.fep.max_parallel_states, len(states))
+    LOG.info(
+        "fep %s rerun: up to %d concurrent passes at %d MPI rank(s) each",
+        ladder.leg.value, workers, state_ranks,
+    )
+    items = enumerate(zip(states, state_dirs, systems))
+    if workers == 1:
+        results = list(map(rerun_one, items))
+    else:
+        # Each pass owns its input, log and output files. map preserves source
+        # order even when passes finish out of order, as required by MBAR N_k.
+        with ThreadPoolExecutor(max_workers=workers,
+                                thread_name_prefix=f"rerun-{ladder.leg.value}") as pool:
+            results = list(pool.map(rerun_one, items))
+    rows, counts = zip(*results)
     u_kn = np.hstack(rows)
     return EnergyMatrix(
         u_kn=u_kn,

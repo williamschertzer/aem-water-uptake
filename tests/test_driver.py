@@ -72,11 +72,12 @@ def test_uptake_uses_the_config_aware_composition_builder():
     assert "build_composition(" not in source
 
 
-def test_consecutive_geometric_shortfalls_accumulate_and_full_batch_resets():
+def test_only_zero_insertion_attempts_accumulate():
     failures = update_failed_batches(0, requested=20, inserted=12)
-    assert failures == 1
+    assert failures == 0
     failures = update_failed_batches(failures, requested=10, inserted=0)
-    assert failures == 2
+    assert failures == 1
+    assert update_failed_batches(failures, requested=10, inserted=3) == 0
     assert update_failed_batches(failures, requested=3, inserted=3) == 0
 
 
@@ -198,6 +199,50 @@ def test_missing_box_is_an_error(tmp_path):
 def test_fresh_uptake_uses_the_dry_structure(tmp_path):
     dry = tmp_path / "dry" / "dry.data"
     assert _resume_data_file(tmp_path, dry, []) == dry
+
+
+def test_fep_uptake_measures_dry_baseline_before_insertion(tmp_path, monkeypatch):
+    """Iteration zero is the unmodified dry cell, not the first water batch."""
+    import json
+    import types
+
+    from aemwater.config import PolymerSpec, RunConfig
+    from aemwater import driver
+
+    config = RunConfig(polymer=PolymerSpec(
+        smiles="[*]CC[*]", n_chains=1, chain_length=1,
+    ))
+    dry = tmp_path / "dry" / "dry.data"
+    dry.parent.mkdir()
+    dry.write_text(
+        "LAMMPS data\n\n1 atoms\n1 atom types\n\n"
+        "0 20 xlo xhi\n0 20 ylo yhi\n0 20 zlo zhi\n\n"
+        "Masses\n\n1 12.01\n\nAtoms # full\n\n"
+        "1 1 1 0.0 1.0 1.0 1.0 0 0 0\n"
+    )
+    estimate = types.SimpleNamespace(mu_ex=-5.0, stderr=0.1, converged=True)
+    reference = types.SimpleNamespace(
+        mu_ex=types.SimpleNamespace(mu_ex=-6.5, stderr=0.1, converged=True),
+        settings=None, method="fep", sanity=lambda: [],
+    )
+    monkeypatch.setattr(driver, "_check_reference_matches", lambda *a, **k: None)
+    monkeypatch.setattr(driver, "_membrane_mu_ex_fep",
+                        lambda *a, **k: estimate)
+
+    result = driver.run_uptake(
+        config, tmp_path, typed_chains=[object()], bulk_reference=reference,
+    )
+
+    assert result.n_waters == 0
+    assert len(result.iterations) == 1
+    baseline = result.iterations[0]
+    assert baseline.index == 0
+    assert baseline.n_inserted == 0
+    assert baseline.water_uptake_pct == 0.0
+    assert baseline.mu_ex == -5.0
+    state = json.loads((tmp_path / "uptake_state.json").read_text())
+    assert state["baseline_measured"] is True
+    assert (tmp_path / "iter_000" / "relaxed.data").read_text() == dry.read_text()
 
 
 def test_resume_uses_the_last_checkpointed_relaxed_structure(tmp_path):

@@ -461,3 +461,27 @@ def test_soft_style_reduces_to_the_production_style_at_full_coupling(tmp_path):
     )
 
     assert soft["pe"] == pytest.approx(plain["pe"], rel=1e-6)
+
+
+def test_written_host_correction_is_independent_of_ghost_lambda(tmp_path):
+    """Reproduce PE's -0.0476 e residual without a 120k-atom fixture."""
+    host, _ = water_cell(1)
+    for atom, charge in zip(host.structure.atoms, (-0.1, 0.0262, 0.0262)):
+        atom.charge = charge
+    ghosted, ghost = add_ghost_water(host, "spce")
+
+    def written_charges(system, name):
+        path = tmp_path / name
+        write_data_file(system, path, include_pair_coeffs=False)
+        section = path.read_text().split("Atoms # full\n\n")[1].split("\n\n")[0]
+        return [float(line.split()[3]) for line in section.splitlines()]
+
+    reference = written_charges(host, "host.data")
+    for lam in (0.0, 0.2, 0.5, 0.333333333, 1.0):
+        scaled = scale_ghost_charges(ghosted, ghost, lam)
+        charges = written_charges(scaled, f"lambda_{lam}.data")
+        assert charges[:-3] == reference
+        expected = [round(lam * q, 12)
+                    for q in (ghost.charge_o, ghost.charge_h, ghost.charge_h)]
+        assert charges[-3:] == expected
+        assert sum(charges) == pytest.approx(0.0, abs=2e-12)

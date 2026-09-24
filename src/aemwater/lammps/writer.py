@@ -36,6 +36,10 @@ import parmed as pmd
 
 from ..utils import LOG
 
+# Reserved for alchemical water, distinct from WAT for grouping and counting.
+# Its charges must never absorb host rounding.
+GHOST_RESIDUE = "GHO"
+
 #: Amber 1-4 scaling: LJ divided by 2.0, Coulomb by 1.2.
 SPECIAL_BONDS = "lj 0.0 0.0 0.5 coul 0.0 0.0 0.8333333333"
 
@@ -293,21 +297,20 @@ def _molecule_ids(structure: pmd.Structure) -> list[int]:
 
 
 def _rounded_charges(structure: pmd.Structure, decimals: int = 6) -> list[float]:
-    """Per-atom charges rounded for output, corrected to sum to the exact total.
+    """Round and correct the host charge independently of the alchemical ghost.
 
-    Charges are written to finite precision, so a few hundred atoms accumulate a
-    rounding residual of order 1e-4 e. PPPM applies a uniform neutralising
-    background to any net charge, which silently shifts the electrostatic energy,
-    and LAMMPS warns about it. The residual is absorbed by the single atom with
-    the largest magnitude charge, where a 1e-4 e correction is negligible
-    relative to its own value.
+    Applying the residual to the largest charge in the whole cell can move it
+    onto the ghost as lambda increases, changing the host Hamiltonian between
+    windows. Ghost charges instead retain the rerun's twelve-decimal precision.
     """
     charges = [float(a.charge) for a in structure.atoms]
-    rounded = [round(q, decimals) for q in charges]
-    exact_total = round(sum(charges))
-    residual = exact_total - sum(rounded)
-    if abs(residual) > 0.5 * 10 ** (-decimals):
-        idx = max(range(len(rounded)), key=lambda i: abs(rounded[i]))
+    host = [a.idx for a in structure.atoms if a.residue.name != GHOST_RESIDUE]
+    rounded = [round(q, 12 if a.residue.name == GHOST_RESIDUE else decimals)
+               for a, q in zip(structure.atoms, charges)]
+    exact_total = round(sum(charges[i] for i in host))
+    residual = exact_total - sum(rounded[i] for i in host)
+    if host and abs(residual) > 0.5 * 10 ** (-decimals):
+        idx = max(host, key=lambda i: abs(rounded[i]))
         rounded[idx] = round(rounded[idx] + residual, decimals)
     return rounded
 
@@ -438,7 +441,7 @@ def write_data_file(
     for atom, mol_id, xyz in zip(struct.atoms, mol_ids, coords):
         tid = system.atom_types[system._atom_type_key(atom)]
         out.append(
-            f"{atom.idx + 1} {mol_id} {tid} {charges[atom.idx]:.6f} "
+            f"{atom.idx + 1} {mol_id} {tid} {charges[atom.idx]:.12f} "
             f"{xyz[0]:.6f} {xyz[1]:.6f} {xyz[2]:.6f} 0 0 0"
         )
     out.append("")

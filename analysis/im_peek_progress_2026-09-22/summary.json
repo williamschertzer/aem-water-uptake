@@ -1,0 +1,363 @@
+{
+  "snapshot_utc": "2026-09-22T15:46:10.982151+00:00",
+  "runs": {
+    "im_peek_saturation": {
+      "checkpoint": {
+        "iterations": [
+          {
+            "index": 0,
+            "n_waters_before": 0,
+            "n_requested": 0,
+            "n_inserted": 0,
+            "n_waters_after": 0,
+            "density": 1.1612281493245875,
+            "volume": 28845.725800542816,
+            "lambda_value": 0.0,
+            "water_uptake_pct": 0.0,
+            "mu_ex": -15.398087424817742,
+            "mu_ex_stderr": 0.05544558901060685,
+            "mu_gap": -8.898087424817742,
+            "saturated": false,
+            "geometrically_saturated": false,
+            "sampling_adequate": true,
+            "free_volume_fraction": 0.0,
+            "wall_seconds": 61473.65041589737
+          },
+          {
+            "index": 1,
+            "n_waters_before": 0,
+            "n_requested": 5,
+            "n_inserted": 5,
+            "n_waters_after": 5,
+            "density": 1.17541,
+            "volume": 28625.033333333336,
+            "lambda_value": 0.1,
+            "water_uptake_pct": 0.4465407448773789,
+            "mu_ex": -14.65072304353693,
+            "mu_ex_stderr": 0.05357917866073789,
+            "mu_gap": -8.15072304353693,
+            "saturated": false,
+            "geometrically_saturated": false,
+            "sampling_adequate": true,
+            "free_volume_fraction": 0.010917543200601051,
+            "wall_seconds": 63618.276779174805
+          },
+          {
+            "index": 2,
+            "n_waters_before": 5,
+            "n_requested": 5,
+            "n_inserted": 5,
+            "n_waters_after": 10,
+            "density": 1.1707166666666666,
+            "volume": 28867.166666666668,
+            "lambda_value": 0.2,
+            "water_uptake_pct": 0.8930814897547578,
+            "mu_ex": -16.33714896562325,
+            "mu_ex_stderr": 0.07005509787078405,
+            "mu_gap": -9.83714896562325,
+            "saturated": false,
+            "geometrically_saturated": false,
+            "sampling_adequate": true,
+            "free_volume_fraction": 0.00498919984973704,
+            "wall_seconds": 45525.72232079506
+          },
+          {
+            "index": 3,
+            "n_waters_before": 10,
+            "n_requested": 5,
+            "n_inserted": 5,
+            "n_waters_after": 15,
+            "density": 1.1871,
+            "volume": 28594.666666666668,
+            "lambda_value": 0.3,
+            "water_uptake_pct": 1.339622234632137,
+            "mu_ex": -10.976497505077752,
+            "mu_ex_stderr": 0.07281241219681917,
+            "mu_gap": -4.476497505077752,
+            "saturated": false,
+            "geometrically_saturated": false,
+            "sampling_adequate": false,
+            "free_volume_fraction": 0.0059753005259203604,
+            "wall_seconds": 45185.12816929817
+          },
+          {
+            "index": 4,
+            "n_waters_before": 15,
+            "n_requested": 5,
+            "n_inserted": 5,
+            "n_waters_after": 20,
+            "density": 1.2024233333333332,
+            "volume": 28355.8,
+            "lambda_value": 0.4,
+            "water_uptake_pct": 1.7861629795095155,
+            "mu_ex": -12.864302904611257,
+            "mu_ex_stderr": 0.06595242975246389,
+            "mu_gap": -6.364302904611257,
+            "saturated": false,
+            "geometrically_saturated": false,
+            "sampling_adequate": false,
+            "free_volume_fraction": 0.004108752817430504,
+            "wall_seconds": 46530.60845923424
+          }
+        ],
+        "n_waters": 20,
+        "mu_gap": -6.364302904611257,
+        "stderr": 0.06595242975246389,
+        "failed_batches": 0,
+        "next_step": 5,
+        "baseline_measured": true
+      },
+      "inferred_bulk_mu": -6.5,
+      "quality_checks": [
+        {
+          "iteration": 0,
+          "leg": "lj",
+          "min_samples": 817,
+          "min_overlap": 0.1311
+        },
+        {
+          "iteration": 0,
+          "leg": "coul",
+          "min_samples": 67,
+          "min_overlap": 0.0324
+        },
+        {
+          "iteration": 1,
+          "leg": "lj",
+          "min_samples": 764,
+          "min_overlap": 0.1183
+        },
+        {
+          "iteration": 1,
+          "leg": "coul",
+          "min_samples": 776,
+          "min_overlap": 0.1801
+        },
+        {
+          "iteration": 2,
+          "leg": "lj",
+          "min_samples": 718,
+          "min_overlap": 0.1169
+        },
+        {
+          "iteration": 2,
+          "leg": "coul",
+          "min_samples": 61,
+          "min_overlap": 0.0622
+        },
+        {
+          "iteration": 3,
+          "leg": "lj",
+          "min_samples": 7,
+          "min_overlap": 0.0209
+        },
+        {
+          "iteration": 3,
+          "leg": "coul",
+          "min_samples": 167,
+          "min_overlap": 0.0402
+        },
+        {
+          "iteration": 4,
+          "leg": "lj",
+          "min_samples": 227,
+          "min_overlap": 0.0664
+        },
+        {
+          "iteration": 4,
+          "leg": "coul",
+          "min_samples": 22,
+          "min_overlap": 0.0077
+        }
+      ],
+      "pending_fep": {
+        "lj": {
+          "windows": 11,
+          "last_step_range": [
+            500000,
+            500000
+          ]
+        }
+      }
+    },
+    "im_peek_saturation_longer_relax": {
+      "checkpoint": {
+        "iterations": [
+          {
+            "index": 0,
+            "n_waters_before": 0,
+            "n_requested": 0,
+            "n_inserted": 0,
+            "n_waters_after": 0,
+            "density": 1.1612281493245875,
+            "volume": 28845.725800542816,
+            "lambda_value": 0.0,
+            "water_uptake_pct": 0.0,
+            "mu_ex": -15.398087424817742,
+            "mu_ex_stderr": 0.05544558901060685,
+            "mu_gap": -8.898087424817742,
+            "saturated": false,
+            "geometrically_saturated": false,
+            "sampling_adequate": true,
+            "free_volume_fraction": 0.0,
+            "wall_seconds": 60468.10798406601
+          },
+          {
+            "index": 1,
+            "n_waters_before": 0,
+            "n_requested": 5,
+            "n_inserted": 5,
+            "n_waters_after": 5,
+            "density": 1.1650466666666668,
+            "volume": 28879.5,
+            "lambda_value": 0.1,
+            "water_uptake_pct": 0.4465407448773789,
+            "mu_ex": -15.841016521846559,
+            "mu_ex_stderr": 0.05417942227852136,
+            "mu_gap": -9.341016521846559,
+            "saturated": false,
+            "geometrically_saturated": false,
+            "sampling_adequate": true,
+            "free_volume_fraction": 0.010917543200601051,
+            "wall_seconds": 64363.47051358223
+          },
+          {
+            "index": 2,
+            "n_waters_before": 5,
+            "n_requested": 5,
+            "n_inserted": 5,
+            "n_waters_after": 10,
+            "density": 1.1393366666666667,
+            "volume": 29662.166666666668,
+            "lambda_value": 0.2,
+            "water_uptake_pct": 0.8930814897547578,
+            "mu_ex": -14.0366157798645,
+            "mu_ex_stderr": 0.062340347825474804,
+            "mu_gap": -7.5366157798644995,
+            "saturated": false,
+            "geometrically_saturated": false,
+            "sampling_adequate": false,
+            "free_volume_fraction": 0.006879226145755072,
+            "wall_seconds": 44660.27522826195
+          },
+          {
+            "index": 3,
+            "n_waters_before": 10,
+            "n_requested": 5,
+            "n_inserted": 5,
+            "n_waters_after": 15,
+            "density": 1.14672,
+            "volume": 29601.766666666663,
+            "lambda_value": 0.3,
+            "water_uptake_pct": 1.339622234632137,
+            "mu_ex": -14.957095471177384,
+            "mu_ex_stderr": 0.06023849344634314,
+            "mu_gap": -8.457095471177384,
+            "saturated": false,
+            "geometrically_saturated": false,
+            "sampling_adequate": false,
+            "free_volume_fraction": 0.008954732510288065,
+            "wall_seconds": 45342.34772372246
+          },
+          {
+            "index": 4,
+            "n_waters_before": 15,
+            "n_requested": 5,
+            "n_inserted": 5,
+            "n_waters_after": 20,
+            "density": 1.1689833333333333,
+            "volume": 29165.733333333337,
+            "lambda_value": 0.4,
+            "water_uptake_pct": 1.7861629795095155,
+            "mu_ex": -14.142742162992139,
+            "mu_ex_stderr": 0.06535351709971585,
+            "mu_gap": -7.642742162992139,
+            "saturated": false,
+            "geometrically_saturated": false,
+            "sampling_adequate": false,
+            "free_volume_fraction": 0.00706721536351166,
+            "wall_seconds": 46920.28692483902
+          }
+        ],
+        "n_waters": 20,
+        "mu_gap": -7.642742162992139,
+        "stderr": 0.06535351709971585,
+        "failed_batches": 0,
+        "next_step": 5,
+        "baseline_measured": true
+      },
+      "inferred_bulk_mu": -6.5,
+      "quality_checks": [
+        {
+          "iteration": 0,
+          "leg": "lj",
+          "min_samples": 817,
+          "min_overlap": 0.1311
+        },
+        {
+          "iteration": 0,
+          "leg": "coul",
+          "min_samples": 67,
+          "min_overlap": 0.0324
+        },
+        {
+          "iteration": 1,
+          "leg": "lj",
+          "min_samples": 274,
+          "min_overlap": 0.0426
+        },
+        {
+          "iteration": 1,
+          "leg": "coul",
+          "min_samples": 689,
+          "min_overlap": 0.1579
+        },
+        {
+          "iteration": 2,
+          "leg": "lj",
+          "min_samples": 48,
+          "min_overlap": 0.0148
+        },
+        {
+          "iteration": 2,
+          "leg": "coul",
+          "min_samples": 393,
+          "min_overlap": 0.1472
+        },
+        {
+          "iteration": 3,
+          "leg": "lj",
+          "min_samples": 410,
+          "min_overlap": 0.0739
+        },
+        {
+          "iteration": 3,
+          "leg": "coul",
+          "min_samples": 38,
+          "min_overlap": 0.0134
+        },
+        {
+          "iteration": 4,
+          "leg": "lj",
+          "min_samples": 41,
+          "min_overlap": 0.0113
+        },
+        {
+          "iteration": 4,
+          "leg": "coul",
+          "min_samples": 445,
+          "min_overlap": 0.1222
+        }
+      ],
+      "pending_fep": {
+        "lj": {
+          "windows": 11,
+          "last_step_range": [
+            500000,
+            500000
+          ]
+        }
+      }
+    }
+  }
+}

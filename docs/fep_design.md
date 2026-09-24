@@ -538,7 +538,10 @@ states which term dominates rather than quoting a single number.
 The uptake loop needs mu_ex at every water content to locate saturation, but
 saturation is the water content where two curves cross, and a crossing is
 insensitive to the third decimal of either curve. `FEPSpec.at_screening_resolution()`
-therefore trades precision for throughput:
+provides a cheaper preset. It is applied by `aemwater campaign` unless
+`--production-resolution` is passed. `aemwater run` uses the configured sampling
+settings directly and does not apply this preset:
+
 
 | | production | screening |
 |---|---|---|

@@ -47,6 +47,24 @@ def test_morphology_count_is_configurable_up_front(cfg):
     assert cfg.with_overrides(**{"fep.n_morphologies": 8}).fep.n_morphologies == 8
 
 
+def test_lambda_parallelism_is_configurable(cfg):
+    changed = cfg.with_overrides(**{
+        "fep.max_parallel_states": 8,
+        "fep.ranks_per_state": 2,
+    })
+    assert changed.fep.max_parallel_states == 8
+    assert changed.fep.ranks_per_state == 2
+
+
+@pytest.mark.parametrize("key,value", [
+    ("fep.max_parallel_states", 0),
+    ("fep.ranks_per_state", 0),
+])
+def test_invalid_lambda_parallelism_is_rejected(cfg, key, value):
+    with pytest.raises(ConfigError, match=key.split(".")[-1]):
+        cfg.with_overrides(**{key: value})
+
+
 def test_default_ladders_span_the_full_path(cfg):
     for lams in (cfg.fep.lj_lambdas, cfg.fep.coul_lambdas):
         assert lams[0] == 0.0

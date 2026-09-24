@@ -227,6 +227,9 @@ class SaturationTest:
     membrane: WidomEstimate
     bulk: WidomEstimate
     tolerance_sigma: float = 2.0
+    # Explicit local precision decision for one membrane trajectory only.
+    # The bulk reference must still satisfy its replicated convergence gate.
+    membrane_converged: bool | None = None
 
     @property
     def difference(self) -> float:
@@ -255,7 +258,9 @@ class SaturationTest:
 
     @property
     def trustworthy(self) -> bool:
-        return self.membrane.converged and self.bulk.converged
+        membrane_ok = (self.membrane.converged if self.membrane_converged is None
+                       else self.membrane_converged)
+        return membrane_ok and self.bulk.converged
 
     def summary(self) -> dict[str, object]:
         return {

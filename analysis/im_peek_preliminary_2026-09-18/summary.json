@@ -1,0 +1,29 @@
+{
+  "snapshot_utc": "2026-09-18T20:19:21.876733+00:00",
+  "runs": {
+    "im_peek_saturation": {
+      "completed_iterations": 1,
+      "dry_mu_ex": -15.398087424817742,
+      "inferred_bulk_mu_ex": -6.5,
+      "hydrated_mean_density": 1.1738659999999999,
+      "hydrated_mean_volume": 28662.640000000003,
+      "lj_production_step_range": [
+        474500,
+        490500
+      ],
+      "hydrated_result_exists": false
+    },
+    "im_peek_saturation_longer_relax": {
+      "completed_iterations": 1,
+      "dry_mu_ex": -15.398087424817742,
+      "inferred_bulk_mu_ex": -6.5,
+      "hydrated_mean_density": 1.164212,
+      "hydrated_mean_volume": 28900.18,
+      "lj_production_step_range": [
+        479500,
+        483500
+      ],
+      "hydrated_result_exists": false
+    }
+  }
+}

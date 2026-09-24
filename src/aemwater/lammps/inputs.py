@@ -157,25 +157,25 @@ _TWENTY_ONE_STEP: tuple[tuple[str, float, float, float | None, str], ...] = (
     # (ensemble, temperature_is_high, ps, pressure_fraction, note)
     ("nvt", 1.0,  50.0, None,     "cycle 1: relax hot at the packing volume"),
     ("nvt", 0.0,  50.0, None,     "cycle 1: quench to operating temperature"),
-    ("npt", 0.0,  50.0, 0.0002,   "cycle 1: compress at 0.02% of peak"),
+    ("npt", 0.0,  50.0, 0.02,     "cycle 1: compress at 2% of peak"),
     ("nvt", 1.0,  50.0, None,     "cycle 2: relax hot"),
-    ("nvt", 0.0, 100.0, None,     "cycle 2: quench"),
-    ("npt", 0.0,  50.0, 0.006,    "cycle 2: compress at 0.6% of peak"),
+    ("nvt", 0.0,  100.0, None,    "cycle 2: quench"),
+    ("npt", 0.0,  50.0, 0.6,      "cycle 2: compress at 60% of peak"),
     ("nvt", 1.0,  50.0, None,     "cycle 3: relax hot"),
-    ("nvt", 0.0, 100.0, None,     "cycle 3: quench"),
+    ("nvt", 0.0,  100.0, None,    "cycle 3: quench"),
     ("npt", 0.0,  50.0, 1.0,      "cycle 3: compress at PEAK pressure"),
     ("nvt", 1.0,  50.0, None,     "cycle 4: relax hot under no load"),
-    ("nvt", 0.0, 100.0, None,     "cycle 4: quench"),
-    ("npt", 0.0,   5.0, 0.5,      "cycle 4: decompress to 50% of peak"),
-    ("nvt", 1.0,   5.0, None,     "cycle 5: relax hot"),
+    ("nvt", 0.0,  100.0, None,    "cycle 4: quench"),
+    ("npt", 0.0,  5.0, 0.5,       "cycle 4: decompress to 50% of peak"),
+    ("nvt", 1.0,  5.0, None,      "cycle 5: relax hot"),
     ("nvt", 0.0,  10.0, None,     "cycle 5: quench"),
-    ("npt", 0.0,   5.0, 0.1,      "cycle 5: decompress to 10% of peak"),
-    ("nvt", 1.0,   5.0, None,     "cycle 6: relax hot"),
+    ("npt", 0.0,  5.0, 0.1,       "cycle 5: decompress to 10% of peak"),
+    ("nvt", 1.0,  5.0, None,      "cycle 6: relax hot"),
     ("nvt", 0.0,  10.0, None,     "cycle 6: quench"),
-    ("npt", 0.0,   5.0, 0.01,     "cycle 6: decompress to 1% of peak"),
-    ("nvt", 1.0,   5.0, None,     "cycle 7: relax hot"),
+    ("npt", 0.0,  5.0, 0.01,      "cycle 6: decompress to 1% of peak"),
+    ("nvt", 1.0,  5.0, None,      "cycle 7: relax hot"),
     ("nvt", 0.0,  10.0, None,     "cycle 7: quench"),
-    ("npt", 0.0, 800.0, 0.0,      "cycle 7: production NPT at operating pressure"),
+    ("npt", 0.0,  800.0, 0.0,     "cycle 7: production NPT at operating pressure"),
 )
 
 
@@ -329,7 +329,8 @@ def minimise_spec(md, max_iter: int | None = None) -> MinimiseSpec:
         etol=float(md.min_etol),
         ftol=float(md.min_ftol),
         max_iter=iters,
-        max_eval=iters * 10,
+        max_eval=(int(md.min_maxeval)
+                  if md.min_maxeval is not None else iters * 10),
     )
 
 

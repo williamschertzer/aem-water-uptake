@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import json
 import math
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Sequence
@@ -364,10 +365,9 @@ def run_leg(
     """Sample every state of one leg, then build the matrix and estimate it.
 
     Returns ``{"estimates": {name: LegEstimate}, "state_dirs": [...],
-    "matrix": EnergyMatrix | None}``. Sampling runs are sequential: each state is
-    an independent fixed-lambda MD run, so they parallelise trivially, but LAMMPS
-    already uses the available cores through ``ranks`` and oversubscribing makes
-    every state slower.
+    "matrix": EnergyMatrix | None}``. Each state is an independent fixed-lambda
+    MD run; up to ``fep.max_parallel_states`` are launched concurrently, with
+    ``fep.ranks_per_state`` MPI ranks assigned to each one.
 
     ``system`` is the fully-coupled topology. There is deliberately no
     ``data_file`` parameter: each state's topology is written here with that
@@ -383,11 +383,13 @@ def run_leg(
 
     workdir = Path(workdir)
     workdir.mkdir(parents=True, exist_ok=True)
+    spec = config.fep
     states = ladder.states
     lambdas = tuple(s.lam for s in states)
 
     state_dirs: list[Path] = []
     state_systems: list = []
+    pending: list[tuple[object, Path]] = []
     #: Indices sampled in *this* invocation, whose reruns are therefore stale.
     resampled: list[int] = []
     for state in states:
@@ -423,16 +425,41 @@ def run_leg(
         else:
             LOG.info("fep %s leg: sampling lambda=%.3f (%d/%d)",
                      leg.value, state.lam, state.index + 1, len(states))
-            run_lammps(sdir / "in.fep", ranks=ranks, log_name="state.log",
-                       extra_args=lammps_args)
-            # rerun_j reads state j's trajectory, so a rerun left over from an
-            # earlier attempt at this window is now stale. LAMMPS is
-            # deterministic for a fixed input *and rank count*, so a window
-            # redone under different --ranks gives a different trajectory; the
-            # rerun's diagonal check would catch the mismatch, but as a hard
-            # error deep in the matrix build rather than here.
-            resampled.append(state.index)
+            pending.append((state, sdir))
         state_dirs.append(sdir)
+
+    # All state inputs are materialised before any subprocess starts.  Lambda
+    # windows have disjoint directories and no dependency on one another, so a
+    # thread pool is sufficient: the work happens in external LAMMPS processes
+    # and threads only wait for them.  Keeping max_workers=1 as the default
+    # retains deterministic serial execution and existing resume semantics.
+    state_ranks = spec.ranks_per_state if spec.ranks_per_state is not None else ranks
+
+    def sample_one(item) -> int:
+        state, sdir = item
+        run_lammps(
+            sdir / "in.fep", ranks=state_ranks, log_name="state.log",
+            extra_args=lammps_args,
+        )
+        return state.index
+
+    if pending:
+        workers = min(spec.max_parallel_states, len(pending))
+        LOG.info(
+            "fep %s leg: running %d incomplete lambda state(s), up to %d "
+            "concurrently at %d MPI rank(s) each",
+            leg.value, len(pending), workers, state_ranks,
+        )
+        if workers == 1:
+            resampled.extend(sample_one(item) for item in pending)
+        else:
+            with ThreadPoolExecutor(max_workers=workers,
+                                    thread_name_prefix=f"fep-{leg.value}") as pool:
+                resampled.extend(pool.map(sample_one, pending))
+
+    # rerun_j reads state j's trajectory, so every resampled state invalidates
+    # its previous rerun. LAMMPS is deterministic for a fixed input and rank
+    # count; changing ranks can otherwise leave a plausible but stale matrix.
 
     estimates: dict[str, LegEstimate] = {}
     matrix = None
@@ -444,7 +471,7 @@ def run_leg(
         matrix = build_energy_matrix(
             ladder, state_dirs=state_dirs, systems=state_systems,
             ghost=ghost, config=config, workdir=workdir / "rerun",
-            lammps_args=lammps_args, resume=resume, stale=tuple(resampled),
+            lammps_args=lammps_args, ranks=ranks, resume=resume, stale=tuple(resampled),
         )
         if "mbar" in wanted:
             estimates["mbar"] = mbar_estimate(matrix)
@@ -529,7 +556,7 @@ def select_reported(
         other = estimates.get(name)
         if other is None or name == chosen:
             continue
-        for key in ("lambdas", "dudl_mean", "dudl_sd", "neighbour_overlap"):
+        for key in ("lambdas", "dudl_mean", "dudl_sd", "neighbour_overlap", "N_k"):
             if key in other.diagnostics and key not in est.diagnostics:
                 carried[key] = other.diagnostics[key]
 
@@ -580,7 +607,7 @@ def estimator_disagreement(
 
 
 #: Bumped when a change to this module would alter a cached FEP number.
-FEP_ESTIMATOR_VERSION = 1
+FEP_ESTIMATOR_VERSION = 2
 
 
 def fep_cache_key(bulk_settings, fep_spec) -> str:
@@ -607,6 +634,7 @@ def fep_cache_key(bulk_settings, fep_spec) -> str:
             "production_steps": fep_spec.production_steps,
             "sample_every": fep_spec.sample_every,
             "n_morphologies": fep_spec.n_morphologies,
+            "ranks_per_state": fep_spec.ranks_per_state,
             "estimators": sorted(fep_spec.estimators),
             "soft_core_n": fep_spec.soft_core_n,
             "alpha_lj": fep_spec.alpha_lj,
@@ -804,7 +832,17 @@ def run_membrane_campaign(
                          index, cached.mu_ex, cached.stderr)
                 morphologies.append(cached)
                 continue
-        o_type, h_type = system.water_atom_types()
+        if cell.has_water():
+            o_type, h_type = system.water_atom_types()
+            water_bond_type = system.water_bond_type()
+            water_angle_type = system.water_angle_type()
+        else:
+            # A dry-polymer baseline contains no resident HOH residue. Its
+            # alchemical ghost supplies the water types and constraints needed
+            # by the FEP input, and is the only water-like molecule present.
+            o_type, h_type = ghost.type_o, ghost.type_h
+            water_bond_type = ghost.bond_type
+            water_angle_type = ghost.angle_type
         # Counted off the *input* cell, before the ghost is added.
         # ``n_polymer_molecules`` counts residues that are neither water nor
         # ion, and the ghost has its own residue name (GHO), so counting the
@@ -821,8 +859,8 @@ def run_membrane_campaign(
         shared = dict(
             groups=GroupSpec(n_polymer_molecules=n_poly, n_ion_molecules=n_ion,
                              water_type_o=o_type, water_type_h=h_type),
-            constraints=constraint_spec(config.md, system.water_bond_type(),
-                                        system.water_angle_type()),
+            constraints=constraint_spec(config.md, water_bond_type,
+                                        water_angle_type),
             comm_cutoff=comm_cutoff(config.md),
         )
 

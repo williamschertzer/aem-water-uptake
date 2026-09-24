@@ -36,6 +36,7 @@ from ..utils import LOG
 __all__ = [
     "plot_dudl",
     "plot_overlap",
+    "plot_mbar",
     "plot_morphologies",
     "write_campaign_figures",
 ]
@@ -72,11 +73,14 @@ def _style():
 def plot_dudl(
     curves: dict[str, tuple[Sequence[float], Sequence[float], Sequence[float]]],
     path: Path | str,
+    *,
+    estimates: dict[str, tuple[str, float, float]] | None = None,
 ):
     """<dU/dlambda> per leg, with the fluctuation as a band.
 
-    ``curves`` maps leg name -> (lambdas, mean, sd), all in kT. The band is the
-    per-state standard deviation of dU/dlambda, not a standard error: the point
+    ``curves`` maps leg name -> (lambdas, mean, sd), all in kcal/mol because
+    LAMMPS ``real``-unit energy differences feed the finite difference directly.
+    The band is the per-state standard deviation of dU/dlambda, not a standard error: the point
     of showing it is that the *fluctuation* governs neighbouring-state overlap,
     so a region where the mean is flat but the band is wide still needs states.
     """
@@ -103,13 +107,40 @@ def plot_dudl(
         # how a reader checks the curve against the reported result.
         area = float(np.trapezoid(mean, lam)) if hasattr(np, "trapezoid") \
             else float(np.trapz(mean, lam))
-        ax.set_title(f"{_LEG_LABEL.get(leg, leg)} leg: integral = {area:+.2f} kT")
+        title = f"{_LEG_LABEL.get(leg, leg)}: TI = {area:+.2f} kcal/mol"
+        if estimates and leg in estimates:
+            name, value, error = estimates[leg]
+            title += f"\n{name.upper()} = {value:+.2f} +/- {error:.2f} kcal/mol"
+        ax.set_title(title)
         ax.set_xlabel("coupling parameter lambda")
         ax.set_xlim(-0.03, 1.03)
         ax.margins(y=0.12)
         ax.legend(frameon=False, loc="best")
 
-    axes[0].set_ylabel("dU/dlambda  (kT)")
+    axes[0].set_ylabel("dU/dlambda  (kcal/mol)")
+    fig.tight_layout()
+    fig.savefig(path)
+    plt.close(fig)
+    return Path(path)
+
+
+def plot_mbar(
+    profiles: dict[str, tuple[Sequence[float], Sequence[float]]],
+    path: Path | str,
+):
+    """Cumulative MBAR free energy from lambda=0 to every sampled state."""
+    plt = _style()
+    fig, ax = plt.subplots(figsize=(4.6, 3.0))
+    for leg, (lambdas, delta_f) in profiles.items():
+        ax.plot(lambdas, delta_f, "o-", lw=1.4, ms=3.5,
+                color=_LEG_COLOUR.get(leg, "#333333"),
+                label=_LEG_LABEL.get(leg, leg))
+    ax.axhline(0.0, color="#999999", lw=0.6)
+    ax.set_xlabel("coupling parameter lambda")
+    ax.set_ylabel("MBAR cumulative free energy (kcal/mol)")
+    ax.set_title("Free energy relative to lambda = 0")
+    ax.legend(frameon=False)
+    ax.grid(alpha=0.25, lw=0.5)
     fig.tight_layout()
     fig.savefig(path)
     plt.close(fig)
@@ -300,10 +331,26 @@ def write_campaign_figures(
     written: list[Path] = []
 
     curves, overlaps = _figure_data(estimate)
+    selected: dict[str, tuple[str, float, float]] = {}
+    mbar_profiles: dict[str, tuple[Sequence[float], Sequence[float]]] = {}
+    per = [m for m in getattr(estimate, "per_morphology", ()) or ()
+           if getattr(m, "legs", None)]
+    if per:
+        for leg_name, leg_est in per[0].legs.items():
+            selected[leg_name] = (
+                str(getattr(leg_est, "estimator", "reported")),
+                float(getattr(leg_est, "delta_f", np.nan)),
+                float(getattr(leg_est, "stderr", np.nan)),
+            )
+            d = leg_est.diagnostics or {}
+            lam, cumulative = d.get("lambdas"), d.get("per_state_delta_f")
+            if lam and cumulative and len(lam) == len(cumulative):
+                mbar_profiles[leg_name] = (lam, cumulative)
 
     overlap_kw = {} if min_overlap is None else {"min_overlap": min_overlap}
     for name, fn, arg, kw in (
-        ("fep_dudl.png", plot_dudl, curves, {}),
+        ("fep_dudl.png", plot_dudl, curves, {"estimates": selected}),
+        ("fep_mbar.png", plot_mbar, mbar_profiles, {}),
         ("fep_overlap.png", plot_overlap, overlaps, overlap_kw),
         ("fep_morphologies.png", plot_morphologies, estimate, {}),
     ):

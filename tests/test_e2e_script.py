@@ -126,8 +126,8 @@ def test_the_shipped_config_is_valid_and_selects_fep():
     config.validate()
     assert config.mu_ex_method == "fep"
 
-    # The screening preset is what the loop actually runs, so the cheap
-    # settings have to survive it -- see test_fep_config.py for why.
+    # Campaign screening must also preserve this cheap example configuration;
+    # a single run now uses the configured settings directly.
     screening = config.fep.at_screening_resolution()
     assert screening.production_steps == config.fep.production_steps
     assert len(screening.lj_lambdas) == len(config.fep.lj_lambdas)

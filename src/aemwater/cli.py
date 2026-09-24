@@ -72,14 +72,29 @@ def _load_config(args) -> RunConfig:
         "water_model": getattr(args, "water_model", None),
         "md.temperature": getattr(args, "temperature", None),
         "md.mpi_ranks": getattr(args, "ranks", None),
+        # Keep the persisted, resolved configuration honest when --workdir
+        # overrides the (usually stale) value embedded in the input YAML.
+        "workdir": str(args.workdir) if getattr(args, "workdir", None) is not None else None,
     }
     return config.with_overrides(**{k: v for k, v in overrides.items() if v is not None})
+
+
+def _save_run_config(config: RunConfig, workdir: Path | str) -> Path:
+    """Persist the fully resolved configuration before expensive work starts.
+
+    ``run_config.yaml`` is deliberately distinct from a user's input
+    ``config.yaml``: the latter may live in the work directory and must not be
+    overwritten merely because defaults and command-line overrides were
+    resolved.
+    """
+    return config.dump_yaml(Path(workdir) / "run_config.yaml")
 
 
 def cmd_prepare(args) -> int:
     from .prepare import prepare_dry_membrane
 
     config = _load_config(args)
+    _save_run_config(config, args.workdir)
     dry = prepare_dry_membrane(config, args.workdir)
     print(json.dumps(dry.summary(), indent=2))
     return 0
@@ -104,6 +119,8 @@ def cmd_bulk(args) -> int:
     # The bulk reference does not depend on the polymer at all, so `bulk` runs
     # without one; only the state point and water model matter.
     config = _load_config(args) if (args.config or args.smiles) else _bulk_only_config(args)
+    config = config.with_overrides(**{"workdir": str(args.workdir)})
+    _save_run_config(config, args.workdir)
     settings = BulkSettings(
         water_model=config.water_model, temperature=config.md.temperature,
         pressure=config.md.pressure, n_waters=bulk_n_waters(config.widom),
@@ -132,6 +149,7 @@ def cmd_campaign(args) -> int:
 
     config = _load_config(args)
     workdir = args.workdir
+    _save_run_config(config, workdir)
     bulk_mu = getattr(args, "bulk_mu_ex", None)
     bulk_err = getattr(args, "bulk_stderr", None)
     if (bulk_mu is None) != (bulk_err is None):
@@ -155,6 +173,8 @@ def cmd_campaign(args) -> int:
             bulk_reference=bulk_reference,
             resume=not args.force,
             screening=not args.production_resolution,
+            parallel_morphologies=getattr(args, "parallel_morphologies", 1),
+            first_morphology_seed=getattr(args, "first_morphology_seed", None),
         )
     except UptakeCampaignError as exc:
         raise SystemExit(str(exc)) from exc
@@ -163,6 +183,11 @@ def cmd_campaign(args) -> int:
     (workdir / "campaign_result.json").write_text(json.dumps(summary, indent=2))
     print(json.dumps(summary, indent=2))
 
+    if campaign.n_usable != len(campaign.per_morphology):
+        print("\nCampaign incomplete: some trajectories did not reach thermodynamic "
+              "saturation; the reported mean covers only the completed subset.",
+              file=sys.stderr)
+        return 2
     if campaign.n_usable < 2:
         print("\nWARNING: fewer than two usable morphologies, so the uptake "
               "carries no uncertainty estimate. This is a single sample.",
@@ -177,6 +202,26 @@ def cmd_run(args) -> int:
 
     config = _load_config(args)
     workdir = args.workdir
+    resume_minimized = getattr(args, "resume_minimized", False)
+    if resume_minimized:
+        if args.force:
+            raise SystemExit("--resume-minimized cannot be combined with --force")
+        saved_path = Path(workdir) / "run_config.yaml"
+        if not saved_path.is_file():
+            raise SystemExit("--resume-minimized requires the previous run_config.yaml")
+        saved = RunConfig.from_yaml(saved_path)
+        if saved.polymer != config.polymer:
+            raise SystemExit("--resume-minimized requires unchanged polymer settings")
+        if (Path(workdir) / "uptake_state.json").exists():
+            raise SystemExit("--resume-minimized cannot replace a membrane with uptake checkpoints")
+        if (Path(workdir) / "dry/dry.data").exists():
+            raise SystemExit("--resume-minimized requires an unfinished dry equilibration; "
+                             "dry/dry.data already exists")
+        from .prepare import _load_typed_chain
+        if (not (Path(workdir) / "dry/min.data").is_file()
+                or _load_typed_chain(Path(workdir) / "dry/typed_chain.pkl") is None):
+            raise SystemExit("--resume-minimized requires min.data and a usable typed_chain.pkl")
+    _save_run_config(config, workdir)
     bulk_mu = getattr(args, "bulk_mu_ex", None)
     bulk_err = getattr(args, "bulk_stderr", None)
     if (bulk_mu is None) != (bulk_err is None):
@@ -192,8 +237,14 @@ def cmd_run(args) -> int:
             "kcal/mol; no bulk simulation or cache validation will be performed",
             bulk_mu, bulk_err,
         )
-    typed_chains, _reused = obtain_dry_membrane(
-        config, workdir, resume=not args.force)
+    if resume_minimized:
+        from .prepare import prepare_dry_membrane
+
+        dry = prepare_dry_membrane(config, workdir, resume_minimized=True)
+        typed_chains = dry.typed_chains
+    else:
+        typed_chains, _reused = obtain_dry_membrane(
+            config, workdir, resume=not args.force)
 
     result = run_uptake(
         config, workdir, typed_chains, bulk_reference=bulk_reference,
@@ -207,6 +258,65 @@ def cmd_run(args) -> int:
         print("\nWARNING: the loop did not reach saturation. The reported uptake "
               "is a lower bound.", file=sys.stderr)
         return 2
+    return 0
+
+
+def cmd_diagnostics(args) -> int:
+    """Regenerate FEP diagnostic figures from completed checkpoints."""
+    from .fep.campaign import combine_morphologies
+    from .fep.diagnostics import write_campaign_figures
+    from .fep.resume import load_morphology
+    from .uptake_diagnostics import plot_run
+
+    workdir = Path(args.workdir)
+    config_path = workdir / "run_config.yaml"
+    if not config_path.is_file():
+        raise SystemExit(
+            f"no saved configuration at {config_path}; pass the top-level run "
+            "directory containing run_config.yaml"
+        )
+    config = RunConfig.from_yaml(config_path)
+
+    # A single-run uptake iteration is ``iter_NNN/fep/morph00``; bulk and
+    # multi-morphology campaigns use the same morphology checkpoint one level
+    # below their campaign directory. Grouping by that parent makes this
+    # command work for all of them without reconstructing raw estimator files.
+    written: list[Path] = []
+    try:
+        written.append(plot_run(
+            workdir, workdir / "uptake_analysis.png", args.water_mu,
+        ))
+    except (FileNotFoundError, ValueError, KeyError) as exc:
+        LOG.info("skipping uptake_analysis.png: %s", exc)
+
+    groups: dict[Path, list] = {}
+    for checkpoint in sorted(workdir.rglob("morphology.json")):
+        morphology = load_morphology(checkpoint)
+        if morphology is not None:
+            groups.setdefault(checkpoint.parent.parent, []).append(morphology)
+
+    if not groups and not written:
+        raise SystemExit(
+            f"no plottable uptake trajectory or completed FEP morphology "
+            f"checkpoints found below {workdir}"
+        )
+
+    for campaign_dir, morphologies in groups.items():
+        estimate = combine_morphologies(
+            morphologies, config.md.temperature,
+            max_stderr=config.fep.max_stderr,
+        )
+        written.extend(write_campaign_figures(
+            estimate, campaign_dir, min_overlap=config.fep.min_overlap,
+        ))
+
+    if not written:
+        raise SystemExit(
+            "completed checkpoints were found, but they contain no plottable "
+            "FEP diagnostics"
+        )
+    for path in written:
+        print(path)
     return 0
 
 
@@ -265,6 +375,8 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("run", help="load water to saturation")
     _add_common(p); _add_polymer(p)
+    p.add_argument("--resume-minimized", action="store_true",
+                   help="reuse dry/min.data and typed chain; repeat equilibration only")
     p.add_argument("--force", action="store_true",
                    help="rebuild the dry membrane and restart the loop")
     p.add_argument("--bulk-mu-ex", type=float, metavar="KCAL_PER_MOL",
@@ -273,6 +385,19 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--bulk-stderr", type=float, metavar="KCAL_PER_MOL",
                    help="uncertainty for --bulk-mu-ex")
     p.set_defaults(func=cmd_run)
+
+    p = sub.add_parser(
+        "diagnostics", help="plot diagnostics from a completed FEP run")
+    p.add_argument(
+        "--workdir", type=Path, required=True,
+        help="top-level run directory containing run_config.yaml",
+    )
+    p.add_argument("-v", "--verbose", action="store_true")
+    p.add_argument(
+        "--water-mu", type=float,
+        help="bulk-water excess chemical potential for an unfinished run",
+    )
+    p.set_defaults(func=cmd_diagnostics)
 
     p = sub.add_parser(
         "campaign",
@@ -285,6 +410,10 @@ def main(argv: list[str] | None = None) -> int:
                    help="run every iteration at full FEP resolution instead of "
                         "the screening ladder; roughly 6.4x the cost per "
                         "morphology")
+    p.add_argument("--parallel-morphologies", type=int, default=1, metavar="N",
+                   help="maximum simultaneous uptake trajectories (default: 1)")
+    p.add_argument("--first-morphology-seed", type=int, default=None,
+                   help="original packing seed when reusing a saved membrane in morph00/dry")
     p.add_argument("--force", action="store_true",
                    help="rebuild every morphology and restart its loop")
     p.add_argument("--bulk-mu-ex", type=float, metavar="KCAL_PER_MOL",

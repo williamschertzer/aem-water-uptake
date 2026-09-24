@@ -31,6 +31,70 @@ from aemwater.lammps.writer import write_data_file
 from conftest import BTMA_PS, lammps_binary, needs_lammps
 
 
+@pytest.mark.parametrize("per_state_ranks", [None, 2])
+def test_parallel_reruns_preserve_order_resume_and_rank_settings(
+    tmp_path, monkeypatch, cfg, ladder, per_state_ranks,
+):
+    import threading
+    from aemwater.fep import rerun as module
+
+    config = cfg.with_overrides(**{
+        "fep.max_parallel_states": 2,
+        "fep.ranks_per_state": per_state_ranks,
+    })
+    dirs = [tmp_path / f"s{j}" for j in range(3)]
+    for j, directory in enumerate(dirs):
+        directory.mkdir()
+        np.savetxt(directory / "pe.dat", [[100, 10 + j]])
+    monkeypatch.setattr(module, "write_rerun_input", lambda *a, **kw: ())
+    monkeypatch.setattr(module, "rerun_complete", lambda *a: False)
+    lock = threading.Lock()
+    second_finished = threading.Event()
+    active = maximum = 0
+    calls = []
+
+    def fake_run(path, *, workdir, ranks, **kwargs):
+        nonlocal active, maximum
+        j = int(path.stem.split("_")[-1])
+        with lock:
+            active += 1
+            maximum = max(maximum, active)
+            calls.append((j, ranks))
+        try:
+            if j == 0:
+                assert second_finished.wait(5), "reruns did not overlap"
+            targets = [k for k in range(3) if k != j]
+            np.savetxt(workdir / f"rerun_{j}.dat",
+                       [[100, 10 + j, *[k - j for k in targets]]])
+        finally:
+            with lock:
+                active -= 1
+            if j == 1:
+                second_finished.set()
+
+    monkeypatch.setattr(module, "run_lammps", fake_run)
+    shared = dict(state_dirs=dirs, systems=[None] * 3, ghost=None,
+                  config=config, workdir=tmp_path / "rr", ranks=4)
+    matrix = build_energy_matrix(ladder, **shared)
+    assert maximum == 2
+    assert sorted(calls) == [(j, per_state_ranks or 4) for j in range(3)]
+    np.testing.assert_allclose(matrix.u_kn * matrix.kT,
+                               [[10] * 3, [11] * 3, [12] * 3])
+    np.testing.assert_array_equal(matrix.N_k, [1, 1, 1])
+
+    monkeypatch.setattr(module, "rerun_complete", lambda *a: True)
+    calls.clear()
+    build_energy_matrix(ladder, **shared)
+    assert calls == []
+    build_energy_matrix(ladder, stale=(1,), **shared)
+    assert calls == [(1, per_state_ranks or 4)]
+
+    # Cached passes still undergo validation inside the workers.
+    np.savetxt(dirs[2] / "pe.dat", [[100, 99]])
+    with pytest.raises(ValueError, match="rerun energies differ"):
+        build_energy_matrix(ladder, **shared)
+
+
 def _water_cell(n, edge):
     k = int(math.ceil(n ** (1 / 3)))
     spacing = edge / k
@@ -471,3 +535,24 @@ def test_the_rerun_input_emits_all_four_bonded_styles(
                   "improper_style"):
         assert re.search(rf"^{style}\s+\S+", text, re.M), \
             f"rendered rerun input has no {style}"
+
+
+@needs_lammps
+def test_coulomb_diagonal_with_host_charge_residual(tmp_path, cfg):
+    host = _water_cell(8, 15.0)
+    # Keep every host charge smaller than the charged ghost oxygen, so the old
+    # writer incorrectly assigned the neutralisation residual to the ghost.
+    for atom in host.structure.atoms:
+        atom.charge *= 0.1
+    host.structure.atoms[0].charge -= 0.0476
+    system, ghost = add_ghost_water(host, "spce", seed=7)
+    ladder = LambdaLadder(leg=FEPLeg.COUL, lambdas=(0.0, 0.5, 1.0))
+    cfg = cfg.with_overrides(**{"fep.equil_steps": 10,
+                               "fep.production_steps": 200,
+                               "fep.sample_every": 10})
+    dirs, systems = _sample(ladder, (system, ghost), cfg, tmp_path)
+    matrix = build_energy_matrix(
+        ladder, state_dirs=dirs, systems=systems, ghost=ghost, config=cfg,
+        workdir=tmp_path / "rerun",
+    )
+    assert matrix.N_k.tolist() == [20, 20, 20]

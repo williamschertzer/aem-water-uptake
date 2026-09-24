@@ -21,6 +21,44 @@ class EquilibrationError(RuntimeError):
     """Raised when the dry membrane fails its convergence criteria."""
 
 
+TYPED_CHAIN_CHECKPOINT = "typed_chain.pkl"
+
+
+def _save_typed_chain(structure, path: Path | str) -> Path:
+    """Atomically checkpoint the parameterised ParmEd chain object."""
+    import pickle
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    with temporary.open("wb") as handle:
+        pickle.dump(structure, handle, protocol=pickle.HIGHEST_PROTOCOL)
+    temporary.replace(path)
+    return path
+
+
+def _load_typed_chain(path: Path | str):
+    """Load a locally generated ParmEd checkpoint, returning None if unusable."""
+    import pickle
+
+    path = Path(path)
+    if not path.is_file():
+        return None
+    try:
+        with path.open("rb") as handle:
+            structure = pickle.load(handle)  # noqa: S301 - trusted local run checkpoint
+    except (OSError, pickle.PickleError, EOFError, AttributeError,
+            ImportError, ValueError) as exc:
+        LOG.warning("typed-chain checkpoint %s is unreadable (%s); rebuilding it",
+                    path, exc)
+        return None
+    if not hasattr(structure, "atoms") or not hasattr(structure, "coordinates"):
+        LOG.warning("typed-chain checkpoint %s is not a ParmEd structure; rebuilding it",
+                    path)
+        return None
+    return structure
+
+
 @dataclass(frozen=True)
 class DryConvergence:
     """Whether the dry membrane is actually equilibrated.
@@ -206,7 +244,8 @@ class DryMembrane:
         return out
 
 
-def prepare_dry_membrane(config, workdir: Path | str) -> DryMembrane:
+def prepare_dry_membrane(config, workdir: Path | str, *,
+                         resume_minimized: bool = False) -> DryMembrane:
     """SMILES -> typed chains -> packed cell -> annealed dry membrane."""
     from .assembly import CellContents, assemble, ion_molecules
     from .chemistry import composition_from_config
@@ -240,51 +279,81 @@ def prepare_dry_membrane(config, workdir: Path | str) -> DryMembrane:
         comp.total_ionic_groups, comp.dry_molar_mass,
     )
 
-    # --- one typing run, reused for every chain -----------------------------
-    # Every chain is the same molecule, so charges are derived once. This is the
-    # single most expensive step in the workflow.
-    chain = build_chain(
-        config.polymer.smiles, config.polymer.chain_length,
-        terminal_group=config.polymer.terminal_group, seed=config.box.seed,
-    )
-    LOG.info("typing the chain with GAFF2 (semi-empirical charges)")
-    backend = GAFF2Backend(charge_method=config.polymer.charge_method)
-    typed, fragment_typing = backend.type_chain(chain, workdir / "typing")
-    # The same ParmEd structure for every chain: identical molecule, identical
-    # charges. Coordinates come from the packer, not from the structure.
-    typed_chains = [typed] * config.polymer.n_chains
+    if resume_minimized:
+        from .driver import _read_final_state
 
-    # --- pack at low density, compress with MD ------------------------------
-    # The packer places rigid bodies, so it takes coordinates rather than typed
-    # structures: chain conformations from the builder, ions as single points.
-    # It sizes the cell itself from the target density and its dilation factor.
-    ions = ion_molecules(comp.n_counterions, comp.counterion)
-    chain_coords = [chain.coordinates()] * config.polymer.n_chains
-    ion_coords = [np.asarray(ion.coordinates, dtype=float) for ion in ions]
-    packed = pack_cell(
-        chain_coords, ion_coords, comp,
-        target_density=config.box.target_density,
-        # BoxSpec states the packing density directly; the packer wants it as a
-        # linear expansion of the target edge. One knob, two conventions:
-        # dilation = (rho_target / rho_initial)^(1/3).
-        dilation=(config.box.target_density / config.box.initial_density) ** (1 / 3),
-        seed=config.box.seed,
-        min_distance=config.box.min_separation,
-    )
-    contents = CellContents(chains=typed_chains, ions=ions, waters=[])
-    edge = packed.edge
-    system = assemble(contents, packed.coordinates, edge=edge)
-    write_data_file(system, workdir / "system.data")
+        typed = _load_typed_chain(workdir / TYPED_CHAIN_CHECKPOINT)
+        if typed is None or not (workdir / "min.data").is_file():
+            raise EquilibrationError(
+                "--resume-minimized requires dry/min.data and a usable "
+                "dry/typed_chain.pkl"
+            )
+        typed_chains = [typed] * config.polymer.n_chains
+        ions = ion_molecules(comp.n_counterions, comp.counterion)
+        coords, _, edge = _read_final_state(workdir / "min.data")
+        system = assemble(CellContents(chains=typed_chains, ions=ions, waters=[]),
+                          coords, edge=edge)
+        md = config.md
+        common = context_from_config(config, system)
+        from datetime import datetime, timezone
+        from shutil import copy2
 
-    md = config.md
-    common = context_from_config(config, system)
-    # The packed cell has close contacts by construction, so minimisation runs
-    # a soft-core push first to separate overlaps before the real potential.
-    render_input("minimise.in.j2", workdir / "in.minimise",
-                 data_file="system.data", out_data="min.data",
-                 out_restart="min.restart", minim=minimise_spec(md),
-                 soft=soft_push_spec(md), **common)
-    run_lammps(workdir / "in.minimise", ranks=md.mpi_ranks, log_name="min.log")
+        archive = workdir / "equilibration_attempts" / datetime.now(
+            timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        archive.mkdir(parents=True)
+        for name in ("in.equilibrate", "equil.log", "dry_density.dat",
+                     "convergence.json"):
+            if (workdir / name).is_file():
+                copy2(workdir / name, archive / name)
+        LOG.info("restarting equilibration from %s; previous attempt saved in %s",
+                 workdir / "min.data", archive)
+    else:
+        # --- one typing run, reused for every chain -----------------------------
+        # Every chain is the same molecule, so charges are derived once. This is the
+        # single most expensive step in the workflow.
+        chain = build_chain(
+            config.polymer.smiles, config.polymer.chain_length,
+            terminal_group=config.polymer.terminal_group, seed=config.box.seed,
+        )
+        LOG.info("typing the chain with GAFF2 (semi-empirical charges)")
+        backend = GAFF2Backend(charge_method=config.polymer.charge_method)
+        typed, fragment_typing = backend.type_chain(chain, workdir / "typing")
+        _save_typed_chain(typed, workdir / TYPED_CHAIN_CHECKPOINT)
+        # The same ParmEd structure for every chain: identical molecule, identical
+        # charges. Coordinates come from the packer, not from the structure.
+        typed_chains = [typed] * config.polymer.n_chains
+
+        # --- pack at low density, compress with MD ------------------------------
+        # The packer places rigid bodies, so it takes coordinates rather than typed
+        # structures: chain conformations from the builder, ions as single points.
+        # It sizes the cell itself from the target density and its dilation factor.
+        ions = ion_molecules(comp.n_counterions, comp.counterion)
+        chain_coords = [chain.coordinates()] * config.polymer.n_chains
+        ion_coords = [np.asarray(ion.coordinates, dtype=float) for ion in ions]
+        packed = pack_cell(
+            chain_coords, ion_coords, comp,
+            target_density=config.box.target_density,
+            # BoxSpec states the packing density directly; the packer wants it as a
+            # linear expansion of the target edge. One knob, two conventions:
+            # dilation = (rho_target / rho_initial)^(1/3).
+            dilation=(config.box.target_density / config.box.initial_density) ** (1 / 3),
+            seed=config.box.seed,
+            min_distance=config.box.min_separation,
+        )
+        contents = CellContents(chains=typed_chains, ions=ions, waters=[])
+        edge = packed.edge
+        system = assemble(contents, packed.coordinates, edge=edge)
+        write_data_file(system, workdir / "system.data")
+
+        md = config.md
+        common = context_from_config(config, system)
+        # The packed cell has close contacts by construction, so minimisation runs
+        # a soft-core push first to separate overlaps before the real potential.
+        render_input("minimise.in.j2", workdir / "in.minimise",
+                     data_file="system.data", out_data="min.data",
+                     out_restart="min.restart", minim=minimise_spec(md),
+                     soft=soft_push_spec(md), **common)
+        run_lammps(workdir / "in.minimise", ranks=md.mpi_ranks, log_name="min.log")
 
     # The 21-step schedule replaces the single squeeze-and-release cycle. See
     # EquilibrationSpec and the template header for why: one squeeze plateaus
@@ -379,24 +448,43 @@ def obtain_dry_membrane(config, workdir: Path | str, *, resume: bool = True):
     it *did* resume correctly and reported success. On a preemptible queue that
     turns a resumable campaign into one that cannot finish.
 
-    Re-typing the chains on reuse is unavoidable: the ParmEd structures are not
-    part of the checkpoint. It is still far cheaper than the anneal it skips.
+    New runs restore the parameterised ParmEd object directly. Legacy runs are
+    migrated from the Amber topology already written by the original typing
+    stage; only a run lacking both checkpoints has to repeat AM1-BCC/GAFF2.
     """
     workdir = Path(workdir)
     dry_data = workdir / "dry" / "dry.data"
 
     if resume and dry_data.exists():
-        from .forcefield.gaff2 import GAFF2Backend
-        from .polymer import build_chain
-
         LOG.info("reusing the dry membrane in %s", dry_data.parent)
-        chain = build_chain(
-            config.polymer.smiles, config.polymer.chain_length,
-            terminal_group=config.polymer.terminal_group,
-            seed=config.box.seed,
-        )
-        backend = GAFF2Backend(charge_method=config.polymer.charge_method)
-        typed, _ = backend.type_chain(chain, workdir / "dry" / "typing")
+        checkpoint = dry_data.parent / TYPED_CHAIN_CHECKPOINT
+        typed = _load_typed_chain(checkpoint)
+
+        if typed is None:
+            # Every historical GAFF2 preparation already left this portable
+            # Amber representation behind. Loading it avoids repeating SQM and
+            # also upgrades the run to the faster pickle checkpoint.
+            topology = dry_data.parent / "typing" / "chain.prmtop"
+            coordinates = dry_data.parent / "typing" / "chain.inpcrd"
+            if topology.is_file() and coordinates.is_file():
+                import parmed as pmd
+
+                LOG.info("migrating legacy typed chain from %s", topology)
+                typed = pmd.load_file(str(topology), str(coordinates))
+                _save_typed_chain(typed, checkpoint)
+            else:
+                from .forcefield.gaff2 import GAFF2Backend
+                from .polymer import build_chain
+
+                LOG.warning("no typed-chain checkpoint found; repeating GAFF2/AM1-BCC once")
+                chain = build_chain(
+                    config.polymer.smiles, config.polymer.chain_length,
+                    terminal_group=config.polymer.terminal_group,
+                    seed=config.box.seed,
+                )
+                backend = GAFF2Backend(charge_method=config.polymer.charge_method)
+                typed, _ = backend.type_chain(chain, dry_data.parent / "typing")
+                _save_typed_chain(typed, checkpoint)
         return [typed] * config.polymer.n_chains, True
 
     dry = prepare_dry_membrane(config, workdir)
@@ -410,4 +498,5 @@ __all__ = [
     "check_dry_convergence",
     "obtain_dry_membrane",
     "prepare_dry_membrane",
+    "TYPED_CHAIN_CHECKPOINT",
 ]

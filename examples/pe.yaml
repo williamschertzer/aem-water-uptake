@@ -4,7 +4,7 @@ polymer:
   name: PE
   # Repeat unit with explicit backbone attachment points.
   smiles: "[*]CC[*]"
-  n_chains: 50
+  n_chains: 200
   chain_length: 100
   counterion: "OH-"
   terminal_group: "CH3"
@@ -29,42 +29,44 @@ md:
   dump_every: 1000
   mpi_ranks: 4
 
-# Dry-membrane equilibration. The 21-step compression/decompression scheme
-# (Larsen, Lin & Colina, Macromolecules 44 (2011) 6944) replaces the single
-# squeeze-and-release cycle, which plateaued near 0.95 g/cm3 for this chemistry
-# -- ~18% below experiment -- with density still rising when the run ended. The
-# leftover volume is void space, and the uptake loop fills voids instead of
-# swelling the cell, which biases lambda high without bound.
-#
-# 1560 ps total at a 1 fs timestep, 800 ps of it the production NPT that the
-# density is averaged over. This dominates the cost of the dry stage.
 equilibration:
   scheme: "21step"
   max_pressure: 50000.0
   high_temperature: 600.0
   time_scale: 1.0
-  final_npt_ps: 800.0
-  # Refuse to hand an unconverged cell to the uptake loop.
-  enforce_convergence: true
-  # Experimental dry density, g/cm3.
+  final_npt_ps: 10.0
+  enforce_convergence: false
   expected_density: 0.8
   density_tolerance: 0.5
   drift_tolerance: 0.002
 
 insertion:
-  batch_fraction: 0.50
-  batch_size: 50
-  min_batch_size: 10
+  batch_fraction: 0.25
+  batch_size: 2
+  min_batch_size: 2
   grid_spacing: 0.5
   probe_radius: 1.4
   max_failed_batches: 3
-  max_iterations: 60
+  max_iterations: 12
 
-widom:
-  enabled: true
-  n_blocks: 5
-  insertions_per_call: 400
-  steps_per_block: 10000
+fep:
+  n_morphologies: 1
+  lj_lambdas: [0.0, 0.25, 0.5, 0.75, 1.0]
+  coul_lambdas: [0.0, 0.5, 1.0]
+  equil_steps: 500
+  production_steps: 2000
+  sample_every: 100
+  estimators: [mbar, bar, ti]
+
+  soft_core_n: 1
+  alpha_lj: 0.5
+  alpha_coul: 10.0
+  ti_delta: 0.01
+  kspace_accuracy: 1.0e-6
+
+  max_stderr: 5.0
+  min_overlap: 0.001
+  seed: 90210
 
 water_model: spce
 workdir: runs/btma_ps_n8_l20

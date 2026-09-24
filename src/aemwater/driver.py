@@ -58,9 +58,8 @@ a reference whose settings do not match.
 Three ways the loop can stop
 ----------------------------
 * thermodynamic  -- mu_ex(membrane) >= mu_ex(bulk) - tolerance. The real answer.
-* geometric      -- no cavity can accept another water. Usually means the batch
-                    size is too large for the remaining free volume, but in a
-                    tightly crosslinked membrane it can be the physical answer.
+* insertion stalled -- repeated attempts add zero waters. Reported as not
+                       converged; geometric blockage is not a thermodynamic endpoint.
 * budget         -- max_iterations reached. Reported as *not converged*, because
                     a number produced by running out of iterations is not an
                     uptake measurement.
@@ -108,6 +107,14 @@ class DriverError(RuntimeError):
     """Raised when the uptake loop cannot proceed."""
 
 
+def _saturation_complete(iterations, extra_iterations: int) -> bool:
+    """Count measured cycles after the first crossing, including on resume."""
+    for position, iteration in enumerate(iterations):
+        if iteration.saturated:
+            return len(iterations) - position - 1 >= extra_iterations
+    return False
+
+
 @dataclass
 class Iteration:
     """One insert-relax-measure cycle."""
@@ -126,6 +133,7 @@ class Iteration:
     mu_gap: float | None = None  # membrane - bulk
     saturated: bool = False
     geometrically_saturated: bool = False
+    sampling_adequate: bool = False
     free_volume_fraction: float = 0.0
     wall_seconds: float = 0.0
 
@@ -166,7 +174,9 @@ class UptakeResult:
         return bool(count) if count is not None else math.isfinite(self.lambda_value)
 
     def summary(self) -> dict[str, object]:
+        first_crossing = next((i for i in self.iterations if i.saturated), None)
         return {
+            "first_saturation_crossing": (first_crossing.to_row() if first_crossing else None),
             "n_waters": self.n_waters,
             # None, not NaN: `json.dumps` writes a bare `NaN` literal, which no
             # strict JSON reader will parse, and this dict is written to
@@ -185,6 +195,7 @@ class UptakeResult:
             "bulk_mu_ex_kcal_mol": round(self.bulk_mu_ex, 3),
             "stop_reason": self.stop_reason,
             "converged": self.converged,
+            "convergence_scope": "single_trajectory_crossing",
             "iterations": len(self.iterations),
             "dry_converged": (None if self.dry_convergence is None
                               else bool(self.dry_convergence.get("converged"))),
@@ -241,8 +252,8 @@ def next_batch_size(
 
 
 def update_failed_batches(previous: int, requested: int, inserted: int) -> int:
-    """Count consecutive geometric shortfalls, resetting after a full batch."""
-    return previous + 1 if inserted < requested else 0
+    """Count consecutive zero-insertion attempts; partial batches are progress."""
+    return previous + 1 if requested > 0 and inserted == 0 else 0
 
 
 def hydration_number(n_waters: int, n_ionic_groups: int) -> float:
@@ -407,6 +418,32 @@ def _write_state(path: Path, payload: dict) -> None:
     write_json(path, payload)
 
 
+def _uptake_saturation_test(membrane_estimate, bulk, config):
+    """Judge a local crossing without claiming between-cell convergence."""
+    from .fep.campaign import FEPEstimate
+
+    local_ok = None
+    if isinstance(membrane_estimate, FEPEstimate):
+        local_ok = (
+            math.isfinite(membrane_estimate.mu_ex)
+            and math.isfinite(membrane_estimate.stderr)
+            and 0 <= 1.96 * membrane_estimate.stderr <= config.fep.max_stderr
+            and len(membrane_estimate.per_morphology) == 1
+        )
+        for morphology in membrane_estimate.per_morphology:
+            local_ok = local_ok and morphology.usable and set(morphology.legs) == {"lj", "coul"}
+            for leg in morphology.legs.values():
+                overlaps = leg.diagnostics.get("neighbour_overlap", [])
+                counts = leg.diagnostics.get("N_k", [])
+                local_ok = local_ok and bool(overlaps) and all(
+                    math.isfinite(x) and x >= config.fep.min_overlap for x in overlaps
+                ) and bool(counts) and min(counts) >= config.fep.min_effective_samples
+    return SaturationTest(
+        membrane_estimate, bulk, tolerance_sigma=config.widom.sigma_tolerance,
+        membrane_converged=local_ok,
+    )
+
+
 def _membrane_mu_ex_fep(config, stage: Path, contents, coords, edge, step: int):
     """mu_ex of water in the relaxed cell, by FEP on that one cell.
 
@@ -422,7 +459,9 @@ def _membrane_mu_ex_fep(config, stage: Path, contents, coords, edge, step: int):
     from .assembly import assemble
     from .fep.campaign import run_membrane_campaign, write_campaign_report
 
-    spec = replace(config.fep.at_screening_resolution(), n_morphologies=1)
+    # Honor the supplied sampling settings. Campaign screening, when selected,
+    # is applied by the campaign caller before reaching this helper.
+    spec = replace(config.fep, n_morphologies=1)
     cell = assemble(contents, coords, edge=edge,
                     water_model_name=config.water_model)
     estimate = run_membrane_campaign(
@@ -554,8 +593,7 @@ def _run_iteration(
     else:
         est = read_widom_file(stage / "mu.dat", md.temperature,
                               n_blocks=config.widom.n_blocks)
-    test = SaturationTest(est, bulk_reference.mu_ex,
-                          tolerance_sigma=config.widom.sigma_tolerance)
+    test = _uptake_saturation_test(est, bulk_reference.mu_ex, config)
     return {
         "coords": new_coords, "elements": new_elements, "edge": new_edge,
         "density": density, "volume": volume, "mu_ex": est.mu_ex,
@@ -739,6 +777,10 @@ def run_uptake(
     for issue in bulk_reference.sanity():
         LOG.warning("bulk reference: %s", issue)
 
+    if not bulk_reference.mu_ex.converged:
+        raise DriverError("bulk reference is unconverged; improve its sampling or "
+                          "replication before running uptake")
+
     # --- the dry membrane --------------------------------------------------
     dry_data = workdir / "dry" / "dry.data"
     if not dry_data.exists():
@@ -785,6 +827,7 @@ def run_uptake(
     converged = False
     failed_batches = 0
     start_step = 0
+    baseline_measured = False
 
     saved = read_json_or_none(state_file, description="uptake checkpoint") \
         if resume else None
@@ -803,13 +846,60 @@ def run_uptake(
         coords, elements, edge = _read_final_state(resume_data)
         failed_batches = saved.get("failed_batches", 0)
         start_step = saved.get("next_step", len(iterations))
+        baseline_measured = bool(saved.get("baseline_measured", False))
         LOG.info(
             "resuming at iteration %d with %d waters from %s "
-            "(%d consecutive geometric shortfalls)",
+            "(%d consecutive zero-insertion attempts)",
             start_step, n_waters, resume_data, failed_batches,
         )
+        if _saturation_complete(iterations, config.insertion.post_saturation_iterations):
+            stop_reason = "thermodynamic_saturation"
+            converged = True
 
-    for step in range(start_step, config.insertion.max_iterations):
+    # Measure the zero-water endpoint before changing the composition. The dry
+    # data file is also this point's relaxed checkpoint, copied into iter_000 so
+    # an interruption immediately after FEP resumes without special cases.
+    if saved is None and config.mu_ex_method == "fep":
+        t0 = time.time()
+        stage = workdir / "iter_000"
+        stage.mkdir(exist_ok=True)
+        shutil.copy2(dry_data, stage / "relaxed.data")
+        contents = CellContents(
+            chains=typed_chains,
+            ions=ion_molecules(comp.n_counterions, comp.counterion),
+            waters=[],
+        )
+        est = _membrane_mu_ex_fep(config, stage, contents, coords, edge, 0)
+        test = _uptake_saturation_test(est, bulk_reference.mu_ex, config)
+        mu_gap = test.difference
+        stderr = est.stderr if np.isfinite(est.stderr) else 0.0
+        iterations.append(Iteration(
+            index=0, n_waters_before=0, n_requested=0, n_inserted=0,
+            n_waters_after=0, density=dry_density, volume=edge ** 3,
+            lambda_value=hydration_number(0, n_ionic), water_uptake_pct=0.0,
+            mu_ex=est.mu_ex, mu_ex_stderr=stderr, mu_gap=mu_gap,
+            saturated=test.saturated, geometrically_saturated=False,
+            sampling_adequate=test.trustworthy,
+            free_volume_fraction=0.0, wall_seconds=time.time() - t0,
+        ))
+        baseline_measured = True
+        start_step = 1
+        _write_state(state_file, {
+            "iterations": [i.to_row() for i in iterations],
+            "n_waters": 0, "mu_gap": mu_gap, "stderr": stderr,
+            "failed_batches": 0, "next_step": start_step,
+            "baseline_measured": True,
+        })
+        LOG.info("iteration 0: dry baseline, uptake = 0.0%%, mu_ex = %.3f "
+                 "(gap %.3f kcal/mol)", est.mu_ex, mu_gap)
+        if _saturation_complete(iterations, config.insertion.post_saturation_iterations):
+            stop_reason = "thermodynamic_saturation"
+            converged = True
+
+    # Baseline FEP is additional to the configured insertion-cycle budget.
+    stop_step = config.insertion.max_iterations + (1 if baseline_measured else 0)
+    steps = range(start_step, stop_step) if not converged else ()
+    for step in steps:
         t0 = time.time()
         n_add = next_batch_size(
             n_waters, n_batch_sites, mu_gap, stderr,
@@ -817,6 +907,9 @@ def run_uptake(
             min_batch=config.insertion.min_batch_size,
             max_batch=config.insertion.batch_size,
         )
+        if iterations and 0 < iterations[-1].n_inserted < iterations[-1].n_requested:
+            n_add = min(n_add, max(config.insertion.min_batch_size,
+                                   iterations[-1].n_inserted))
         stage = workdir / f"iter_{step:03d}"
         stage.mkdir(exist_ok=True)
 
@@ -836,18 +929,19 @@ def run_uptake(
                 "iterations": [i.to_row() for i in iterations],
                 "n_waters": n_waters, "mu_gap": mu_gap, "stderr": stderr,
                 "failed_batches": failed_batches, "next_step": step + 1,
+                "baseline_measured": baseline_measured,
             })
             if failed_batches >= config.insertion.max_failed_batches:
-                stop_reason = "geometric_saturation"
+                stop_reason = "insertion_stalled"
                 LOG.info(
                     "iteration %d: no cavity accepts another water; stopping after "
-                    "%d consecutive geometric shortfalls",
+                    "%d consecutive zero-insertion attempts",
                     step, failed_batches,
                 )
                 break
             LOG.warning(
                 "iteration %d: no cavity accepts another water "
-                "(%d/%d consecutive geometric shortfalls); retrying",
+                "(%d/%d consecutive zero-insertion attempts); retrying",
                 step, failed_batches, config.insertion.max_failed_batches,
             )
             continue
@@ -874,7 +968,8 @@ def run_uptake(
             mu_ex_stderr=state["stderr"],
             mu_gap=mu_gap,
             saturated=state["saturated"],
-            geometrically_saturated=result.saturated,
+            sampling_adequate=state.get("trustworthy", False),
+            geometrically_saturated=False,
             free_volume_fraction=result.void_map.free_volume_fraction,
             wall_seconds=time.time() - t0,
         )
@@ -883,6 +978,7 @@ def run_uptake(
             "iterations": [i.to_row() for i in iterations],
             "n_waters": n_waters, "mu_gap": mu_gap, "stderr": stderr,
             "failed_batches": failed_batches, "next_step": step + 1,
+            "baseline_measured": baseline_measured,
         })
         LOG.info(
             "iteration %d: +%d -> %d waters, lambda = %.2f, uptake = %.1f%%, "
@@ -891,27 +987,16 @@ def run_uptake(
             it.water_uptake_pct, state["mu_ex"], mu_gap,
         )
 
-        if state["saturated"]:
+        if _saturation_complete(iterations, config.insertion.post_saturation_iterations):
             stop_reason = "thermodynamic_saturation"
             converged = True
             break
-        if failed_batches >= config.insertion.max_failed_batches:
-            stop_reason = "geometric_saturation"
-            converged = True
-            LOG.info(
-                "iteration %d: stopping after %d consecutive geometric "
-                "shortfalls (inserted %d/%d in the latest batch)",
-                step, failed_batches, result.n_inserted, result.n_requested,
-            )
-            break
     else:
-        LOG.warning(
-            "reached max_iterations (%d) without saturating; the reported uptake "
-            "is a lower bound", config.insertion.max_iterations
-        )
-
-    if stop_reason == "geometric_saturation":
-        converged = True
+        if not converged:
+            LOG.warning(
+                "reached max_iterations (%d) before completing saturation and "
+                "the requested post-saturation cycles", config.insertion.max_iterations
+            )
 
     final = iterations[-1] if iterations else None
     return UptakeResult(

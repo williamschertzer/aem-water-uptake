@@ -275,6 +275,9 @@ class MDSpec:
     min_etol: float = 1.0e-6
     min_ftol: float = 1.0e-6
     min_maxiter: int = 20000
+    #: Maximum force evaluations.  None retains the historical 10x-iterations
+    #: default while allowing unusually demanding minimisations to override it.
+    min_maxeval: int | None = None
     thermo_every: int = 500
     dump_every: int = 0  # 0 disables trajectory dumps
     #: Number of MPI ranks; 1 means run the serial binary directly.
@@ -302,6 +305,9 @@ class MDSpec:
         )
         for f in ("soft_push_steps", "anneal_steps", "compression_steps", "dry_npt_steps", "relax_npt_steps"):
             _check(getattr(self, f) >= 0, f"md.{f} must be non-negative")
+        _check(self.min_maxiter > 0, "md.min_maxiter must be positive")
+        if self.min_maxeval is not None:
+            _check(self.min_maxeval > 0, "md.min_maxeval must be positive")
 
 
 @dataclass(frozen=True)
@@ -324,10 +330,12 @@ class InsertionSpec:
     water_water_min: float = 2.6
     #: Scale factor applied to van der Waals radii when computing clearance.
     vdw_scale: float = 1.0
-    #: Consecutive geometric failures tolerated before declaring saturation.
+    #: Consecutive zero-insertion attempts before stopping unconverged.
     max_failed_batches: int = 3
     #: Hard cap on iterations.
     max_iterations: int = 60
+    #: Additional successful insertion/measurement cycles after the first crossing.
+    post_saturation_iterations: int = 0
     #: Hard cap on total waters (safety net); 0 means unlimited.
     max_waters: int = 0
     seed: int = 5150
@@ -340,6 +348,8 @@ class InsertionSpec:
         _check(self.water_water_min > 1.5, "insertion.water_water_min must exceed 1.5 Angstrom")
         _check(self.max_failed_batches >= 1, "insertion.max_failed_batches must be >= 1")
         _check(self.max_iterations >= 1, "insertion.max_iterations must be >= 1")
+        _check(isinstance(self.post_saturation_iterations, int) and self.post_saturation_iterations >= 0,
+               "insertion.post_saturation_iterations must be a nonnegative integer")
         _check(self.max_waters >= 0, "insertion.max_waters must be >= 0")
 
 
@@ -394,6 +404,15 @@ class FEPSpec:
     #: sampling within one badly-chosen morphology does not. 1 is permitted for
     #: bulk water (where there is only one liquid) and for smoke tests.
     n_morphologies: int = 3
+
+    #: Number of independent sampling windows or rerun passes to run concurrently.
+    #: One preserves the historical serial behaviour and is safest on a login
+    #: node.  On a scheduler this should not exceed the resources allocated to
+    #: the job divided by ``ranks_per_state``.
+    max_parallel_states: int = 1
+    #: MPI ranks assigned to each sampling window or rerun pass.  ``None`` inherits
+    #: ``md.mpi_ranks`` (including a CLI ``--ranks`` override).
+    ranks_per_state: int | None = None
 
     #: Soft-core LJ ladder (leg 1), charges off. Must span exactly 0 -> 1.
     #: Denser at low lambda because a soft-core dU/dlambda is largest there.
@@ -460,6 +479,8 @@ class FEPSpec:
     min_overlap: float = 0.03
     #: Refuse to report a result whose statistical error exceeds this, kcal/mol.
     max_stderr: float = 0.30
+    #: Minimum decorrelated samples in every FEP window for a local crossing.
+    min_effective_samples: int = 50
 
     seed: int = 90210
 
@@ -482,11 +503,13 @@ class FEPSpec:
         ==================  ===========  ===========
 
         Use :meth:`FEPSpec` unchanged for the final answer. The intended pattern
-        is screening at every iteration and one production campaign at the
-        saturation point. ``aemwater.driver`` applies this preset per iteration
-        (with ``n_morphologies`` forced to 1, since the loop measures the single
-        cell it is carrying); ``aemwater.uptake_campaign`` replicates the loop to
-        get the between-morphology spread.
+        is to select screening explicitly for exploratory calculations.
+        ``aemwater campaign`` applies this preset unless
+        ``--production-resolution`` is selected. ``aemwater run`` uses the
+        configured sampling settings unchanged. The driver only forces
+        ``n_morphologies`` to 1 because each iteration measures its single cell;
+        ``aemwater.uptake_campaign`` replicates the entire loop to measure
+        between-morphology spread.
 
         The ladders are placed at equal thermodynamic length from the bulk
         SPC/E validation run's measured fluctuation profile; see
@@ -521,6 +544,14 @@ class FEPSpec:
 
     def validate(self) -> None:
         _check(self.n_morphologies >= 1, "fep.n_morphologies must be >= 1")
+        _check(
+            self.max_parallel_states >= 1,
+            "fep.max_parallel_states must be >= 1",
+        )
+        _check(
+            self.ranks_per_state is None or self.ranks_per_state >= 1,
+            "fep.ranks_per_state must be >= 1 or null",
+        )
         for name, lams in (("lj_lambdas", self.lj_lambdas),
                            ("coul_lambdas", self.coul_lambdas)):
             _check(len(lams) >= 2, f"fep.{name} needs at least 2 states")
@@ -569,6 +600,7 @@ class FEPSpec:
         _check(0 < self.ti_delta < 0.5, "fep.ti_delta must be in (0, 0.5)")
         _check(0 <= self.min_overlap < 1, "fep.min_overlap must be in [0, 1)")
         _check(self.max_stderr > 0, "fep.max_stderr must be positive")
+        _check(self.min_effective_samples >= 2, "fep.min_effective_samples must be >= 2")
 
 
 @dataclass(frozen=True)

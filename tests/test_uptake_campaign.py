@@ -147,14 +147,14 @@ def test_a_genuinely_failed_morphology_is_still_excluded():
         combine_uptake(camp, -6.8)
 
 
-def test_geometric_saturation_counts_as_usable():
-    """Running out of cavities is a real endpoint, not a failure to converge."""
+def test_geometric_saturation_is_excluded():
+    """Insertion blockage does not establish thermodynamic saturation."""
     camp = combine_uptake(
         [_morph(0, 25.0, stop="geometric_saturation"),
          _morph(1, 27.0, stop="saturated")],
         -6.8,
     )
-    assert camp.n_usable == 2
+    assert camp.n_usable == 1
 
 
 def test_packing_seeds_are_decorrelated_not_merely_distinct():
@@ -215,7 +215,7 @@ def stubbed(monkeypatch):
         # that wiring rot while these tests kept passing.
         calls["references"] += 1
         calls["reference_resume"].append(resume)
-        estimate = types.SimpleNamespace(mu_ex=-6.83)
+        estimate = types.SimpleNamespace(mu_ex=-6.83, converged=True)
         return types.SimpleNamespace(
             mu_ex=estimate, sanity=lambda: [], settings=None, method="fep")
 
@@ -227,6 +227,8 @@ def stubbed(monkeypatch):
             water_uptake_pct=25.0 + index, hydrated_density=1.1,
             stop_reason="saturated", converged=True, iterations=[1, 2, 3],
             bulk_mu_ex=-6.83,
+            to_dataframe=lambda: __import__("pandas").DataFrame(),
+            summary=lambda: {"converged": True},
         )
 
     monkeypatch.setattr(prepare, "prepare_dry_membrane", fake_prepare)
@@ -378,3 +380,37 @@ def test_force_rebuilds_even_when_a_checkpoint_exists(stubbed, tmp_path, monkeyp
         "--force did not reach the bulk reference; it would be read from cache "
         "while the membrane was recomputed"
     )
+
+
+def test_parallel_morphologies_overlap_and_keep_failures_isolated(stubbed, tmp_path, monkeypatch):
+    import threading
+    from pathlib import Path
+    import aemwater.driver as driver
+    calls, mod = stubbed
+    barrier = threading.Barrier(3)
+    original = driver.run_uptake
+
+    def concurrent(config, workdir, typed_chains, **kwargs):
+        barrier.wait(timeout=5)
+        if Path(workdir).name == 'morph01':
+            raise RuntimeError('one failed trajectory')
+        return original(config, workdir, typed_chains, **kwargs)
+
+    monkeypatch.setattr(driver, 'run_uptake', concurrent)
+    result = mod.run_uptake_campaign(_config(), tmp_path, n_morphologies=3,
+                                     parallel_morphologies=3, first_morphology_seed=123)
+    assert calls['references'] == 1
+    assert result.n_usable == 2
+    assert [m.index for m in result.per_morphology] == [0, 1, 2]
+    assert result.per_morphology[0].seed == 123
+    assert 'one failed trajectory' in result.per_morphology[1].failure
+    saved = RunConfig.from_yaml(tmp_path / 'morph00/run_config.yaml')
+    assert saved.box.seed == 123
+    assert str(saved.workdir) == str(tmp_path / 'morph00')
+
+
+def test_parallel_worker_count_must_be_positive(stubbed, tmp_path):
+    calls, mod = stubbed
+    with pytest.raises(UptakeCampaignError, match='parallel_morphologies'):
+        mod.run_uptake_campaign(_config(), tmp_path, parallel_morphologies=0)
+    assert calls['references'] == 0

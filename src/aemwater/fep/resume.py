@@ -114,6 +114,7 @@ def campaign_stamp(config, *, kind: str, **extra) -> dict:
     spec = config.fep
     payload = {
         "kind": kind,
+        "charge_convention": "host-only-correction-v2",
         "water_model": str(config.water_model),
         "temperature": float(config.md.temperature),
         "cutoff": float(config.md.cutoff),
@@ -124,6 +125,8 @@ def campaign_stamp(config, *, kind: str, **extra) -> dict:
         "production_steps": int(spec.production_steps),
         "sample_every": int(spec.sample_every),
         "n_morphologies": int(spec.n_morphologies),
+        "ranks_per_state": (None if spec.ranks_per_state is None
+                            else int(spec.ranks_per_state)),
         "estimators": sorted(spec.estimators),
         "soft_core_n": int(spec.soft_core_n),
         "alpha_lj": float(spec.alpha_lj),

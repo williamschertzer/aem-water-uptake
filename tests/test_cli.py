@@ -84,6 +84,30 @@ def test_command_line_options_override_the_config_file(tmp_path):
     assert config.md.mpi_ranks == 4
 
 
+def test_save_run_config_records_resolved_values(tmp_path):
+    """The snapshot contains defaults and overrides without altering its source."""
+    from aemwater.config import PolymerSpec, RunConfig
+
+    source = tmp_path / "config.yaml"
+    original = RunConfig(
+        polymer=PolymerSpec(smiles="[*]CC[*]", n_chains=2)
+    )
+    original.dump_yaml(source)
+    source_text = source.read_text()
+
+    resolved = original.with_overrides(**{
+        "polymer.n_chains": 7,
+        "md.temperature": 315.0,
+        "workdir": str(tmp_path / "run"),
+    })
+    saved = cli._save_run_config(resolved, tmp_path / "run")
+    reloaded = RunConfig.from_yaml(saved)
+
+    assert saved.name == "run_config.yaml"
+    assert reloaded == resolved
+    assert source.read_text() == source_text
+
+
 def test_bulk_runs_without_a_polymer():
     """The reservoir does not depend on the membrane chemistry."""
     args = cli.argparse.Namespace(config=None, smiles=None, water_model="spce",
@@ -110,6 +134,65 @@ def test_run_help_lists_expert_bulk_override(capsys):
         cli.main(["run", "--help"])
     out = capsys.readouterr().out
     assert "--bulk-mu-ex" in out and "--bulk-stderr" in out
+
+
+def test_diagnostics_command_discovers_completed_iterations(tmp_path, monkeypatch,
+                                                             capsys):
+    """One run path is enough; users need not reconstruct estimate objects."""
+    from aemwater.config import PolymerSpec, RunConfig
+    import aemwater.fep.campaign as campaign
+    import aemwater.fep.diagnostics as diagnostics
+    import aemwater.fep.resume as resume
+
+    RunConfig(polymer=PolymerSpec(smiles="[*]CC[*]")).dump_yaml(
+        tmp_path / "run_config.yaml")
+    checkpoint = tmp_path / "iter_000/fep/morph00/morphology.json"
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_text("{}")
+
+    marker = object()
+    monkeypatch.setattr(resume, "load_morphology", lambda path: marker)
+    monkeypatch.setattr(campaign, "combine_morphologies",
+                        lambda *args, **kwargs: marker)
+
+    def fake_write(estimate, outdir, **kwargs):
+        assert estimate is marker
+        assert outdir == tmp_path / "iter_000/fep"
+        return [outdir / "fep_overlap.png"]
+
+    monkeypatch.setattr(diagnostics, "write_campaign_figures", fake_write)
+    assert cli.main(["diagnostics", "--workdir", str(tmp_path)]) == 0
+    assert "iter_000/fep/fep_overlap.png" in capsys.readouterr().out
+
+
+def test_diagnostics_command_reports_incomplete_run(tmp_path):
+    from aemwater.config import PolymerSpec, RunConfig
+
+    RunConfig(polymer=PolymerSpec(smiles="[*]CC[*]")).dump_yaml(
+        tmp_path / "run_config.yaml")
+    with pytest.raises(SystemExit, match="no plottable uptake trajectory"):
+        cli.main(["diagnostics", "--workdir", str(tmp_path)])
+
+
+def test_diagnostics_command_writes_uptake_plot_without_finished_fep(
+        tmp_path, monkeypatch, capsys):
+    from aemwater.config import PolymerSpec, RunConfig
+    import aemwater.uptake_diagnostics as uptake_diagnostics
+
+    RunConfig(polymer=PolymerSpec(smiles="[*]CC[*]")).dump_yaml(
+        tmp_path / "run_config.yaml")
+
+    def fake_plot(run_dir, output, water_mu):
+        assert run_dir == tmp_path
+        assert output == tmp_path / "uptake_analysis.png"
+        assert water_mu == pytest.approx(-6.1)
+        return output
+
+    monkeypatch.setattr(uptake_diagnostics, "plot_run", fake_plot)
+    assert cli.main([
+        "diagnostics", "--workdir", str(tmp_path), "--water-mu", "-6.1",
+    ]) == 0
+    assert "uptake_analysis.png" in capsys.readouterr().out
 
 
 # ------------------------------------------------------- attribute auditing --
