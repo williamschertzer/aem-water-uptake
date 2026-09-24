@@ -370,7 +370,9 @@ class WidomSpec:
     bulk_box_length: float = 25.0
     #: Equilibration steps for the bulk reference box.
     bulk_equil_steps: int = 50000
-    #: Saturation is declared when delta_mu >= -tolerance*sigma (see widom.py).
+    #: Band for the reported ``gap_within_noise`` flag (total gap >= -tol*sigma).
+    #: Not the uptake stop condition: the loop stops on a trustworthy total
+    #: gap >= 0 and interpolates the zero (aemwater.saturation).
     sigma_tolerance: float = 1.0
     #: Cache directory for the bulk reference (reused across runs).
     cache_dir: str = "~/.cache/aemwater"

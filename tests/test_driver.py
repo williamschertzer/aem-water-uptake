@@ -220,10 +220,14 @@ def test_fep_uptake_measures_dry_baseline_before_insertion(tmp_path, monkeypatch
         "Masses\n\n1 12.01\n\nAtoms # full\n\n"
         "1 1 1 0.0 1.0 1.0 1.0 0 0 0\n"
     )
-    estimate = types.SimpleNamespace(mu_ex=-5.0, stderr=0.1, converged=True)
+    # Excess gap +5.5 kcal/mol: large enough to survive the dry-cell density
+    # term (about -3.3 kcal/mol for a 20 A cell holding only the ghost), so the
+    # dry baseline itself crosses and no insertion is attempted.
+    estimate = types.SimpleNamespace(mu_ex=-1.0, stderr=0.1, converged=True)
     reference = types.SimpleNamespace(
         mu_ex=types.SimpleNamespace(mu_ex=-6.5, stderr=0.1, converged=True),
         settings=None, method="fep", sanity=lambda: [],
+        water_number_density=0.0334,
     )
     monkeypatch.setattr(driver, "_check_reference_matches", lambda *a, **k: None)
     monkeypatch.setattr(driver, "_membrane_mu_ex_fep",
@@ -239,9 +243,19 @@ def test_fep_uptake_measures_dry_baseline_before_insertion(tmp_path, monkeypatch
     assert baseline.index == 0
     assert baseline.n_inserted == 0
     assert baseline.water_uptake_pct == 0.0
-    assert baseline.mu_ex == -5.0
+    assert baseline.mu_ex == -1.0
+    # The dry gap is total: excess (+5.5) plus kT ln(rho_dry / rho_bulk), with
+    # rho_dry = 1/V (the ghost is the only water).
+    from aemwater.widom import KB_KCAL
+    volume = baseline.mu_volume
+    expected_term = KB_KCAL * config.md.temperature * math.log((1 / volume) / 0.0334)
+    assert baseline.mu_gap_excess == pytest.approx(5.5)
+    assert baseline.density_term == pytest.approx(expected_term)
+    assert baseline.mu_gap == pytest.approx(5.5 + expected_term)
+    assert baseline.saturated is True
     state = json.loads((tmp_path / "uptake_state.json").read_text())
     assert state["baseline_measured"] is True
+    assert state["gap_definition"] == driver.GAP_DEFINITION
     assert (tmp_path / "iter_000" / "relaxed.data").read_text() == dry.read_text()
 
 

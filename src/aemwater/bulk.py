@@ -75,6 +75,19 @@ class BulkReference:
     #: be read, so ``sanity()`` branches on it.
     method: str = "widom"
 
+    @property
+    def water_number_density(self) -> float:
+        """(N_b + 1) / V_b in molecules / A^3, for the saturation density term.
+
+        ``volume`` is the cell ``mu_ex`` was sampled in: the NVT FEP cell (exact,
+        from :func:`_fep_cell_density`) or the NPT mean for Widom. The ``+1`` is
+        the ghost / test particle, matching the membrane side's convention (see
+        :func:`aemwater.widom.water_number_density`).
+        """
+        from .widom import water_number_density
+
+        return water_number_density(int(self.settings.n_waters), float(self.volume))
+
     def sanity(self) -> list[str]:
         """Warnings about a reference that disagrees with known behaviour.
 

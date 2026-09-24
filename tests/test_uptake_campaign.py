@@ -217,7 +217,8 @@ def stubbed(monkeypatch):
         calls["reference_resume"].append(resume)
         estimate = types.SimpleNamespace(mu_ex=-6.83, converged=True)
         return types.SimpleNamespace(
-            mu_ex=estimate, sanity=lambda: [], settings=None, method="fep")
+            mu_ex=estimate, sanity=lambda: [], settings=None, method="fep",
+            water_number_density=0.0334)
 
     def fake_uptake(config, workdir, typed_chains, bulk_reference=None, resume=True):
         assert bulk_reference is not None, "trajectory ran without a reference"

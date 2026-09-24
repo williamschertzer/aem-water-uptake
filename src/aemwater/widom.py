@@ -220,9 +220,44 @@ def read_widom_file(path, temperature: float, n_blocks: int = 5) -> WidomEstimat
                                 volumes=volumes)
 
 
+def water_number_density(n_waters: int, volume: float) -> float:
+    """Water number density (molecules / A^3) entering the ideal term of mu.
+
+    ``n_waters`` counts the *real* waters in the cell the excess chemical
+    potential was measured in; the ghost (FEP) or test particle (Widom) is the
+    ``+1``. Decoupling one molecule from an (N+1)-molecule cell gives
+    ``mu = kT ln((N+1) Lambda^3 / (V q_int)) + mu_ex``, so the (N+1)/V convention
+    is the exact one, and it keeps the dry baseline (N = 0) finite.
+    """
+    if volume <= 0 or not math.isfinite(volume):
+        raise ValueError(f"cell volume must be positive and finite, got {volume}")
+    if n_waters < 0:
+        raise ValueError(f"n_waters must be non-negative, got {n_waters}")
+    return (n_waters + 1) / volume
+
+
 @dataclass
 class SaturationTest:
-    """Comparison of membrane and bulk chemical potentials."""
+    """Comparison of membrane and bulk water *total* chemical potentials.
+
+    The quantity that must vanish at equilibrium with liquid water is
+
+        mu_w,m - mu_w,b = [mu_ex,m - mu_ex,b] + kT ln(rho_w,m / rho_w,b)
+
+    The thermal wavelength and the rigid-water internal partition function are
+    identical in both phases and cancel; the water number densities do not.
+    Comparing excess parts alone implicitly sets rho_w,m = rho_w,b, which is
+    never true in a membrane (the polymer occupies volume), and because
+    rho_w,m < rho_w,b the omitted term is always negative: the excess-only gap
+    reaches zero at a *lower* water content than the true one.
+
+    ``rho_membrane`` / ``rho_bulk`` are number densities in the same units
+    (see :func:`water_number_density`), each for the fixed-volume cell its
+    ``mu_ex`` was sampled in. When either is omitted the density term is zero
+    and ``density_term_included`` is False -- kept only so estimator-level unit
+    tests can exercise the excess comparison; the uptake driver always supplies
+    both.
+    """
 
     membrane: WidomEstimate
     bulk: WidomEstimate
@@ -230,11 +265,35 @@ class SaturationTest:
     # Explicit local precision decision for one membrane trajectory only.
     # The bulk reference must still satisfy its replicated convergence gate.
     membrane_converged: bool | None = None
+    rho_membrane: float | None = None
+    rho_bulk: float | None = None
+    #: Kelvin. Defaults to the membrane estimate's temperature.
+    temperature: float | None = None
+
+    @property
+    def density_term_included(self) -> bool:
+        return self.rho_membrane is not None and self.rho_bulk is not None
+
+    @property
+    def density_term(self) -> float:
+        """kT ln(rho_w,m / rho_w,b), kcal/mol. Zero when densities are absent."""
+        if not self.density_term_included:
+            return 0.0
+        if self.rho_membrane <= 0 or self.rho_bulk <= 0:
+            raise ValueError("water number densities must be positive")
+        temperature = (self.temperature if self.temperature is not None
+                       else self.membrane.temperature)
+        return KB_KCAL * temperature * math.log(self.rho_membrane / self.rho_bulk)
+
+    @property
+    def excess_difference(self) -> float:
+        """mu_ex(membrane) - mu_ex(bulk), kcal/mol (the pre-2026-09 criterion)."""
+        return self.membrane.mu_ex - self.bulk.mu_ex
 
     @property
     def difference(self) -> float:
-        """mu_ex(membrane) - mu_ex(bulk). Negative means water still wants in."""
-        return self.membrane.mu_ex - self.bulk.mu_ex
+        """Total mu gap, membrane - bulk. Negative means water still wants in."""
+        return self.excess_difference + self.density_term
 
     @property
     def combined_stderr(self) -> float:
@@ -243,13 +302,24 @@ class SaturationTest:
         return math.hypot(a, b)
 
     @property
-    def saturated(self) -> bool:
-        """Saturated once the membrane is no longer more favourable than bulk.
+    def crossed(self) -> bool:
+        """The uptake loop's stop condition: trustworthy and total gap >= 0.
 
-        The threshold is the combined statistical uncertainty, so a run stops on a
-        difference it can actually resolve rather than on noise.  An apparent
-        crossing from unconverged estimates is not evidence of saturation and
-        must never stop the loading loop.
+        No tolerance band. A ``gap >= -k*sigma`` stop is biased: it fires a
+        systematic ``k*sigma/slope`` waters before the true zero, and more so
+        the noisier the estimate. Noise belongs in the endpoint's error bar,
+        which :func:`aemwater.saturation.estimate_saturation_point` builds by
+        interpolating the gap across the crossing.
+        """
+        return self.trustworthy and self.difference >= 0.0
+
+    @property
+    def saturated(self) -> bool:
+        """Gap statistically consistent with zero (``>= -tolerance*sigma``).
+
+        Reported, not used to stop the uptake loop (that is :attr:`crossed`).
+        An apparent crossing from unconverged estimates is not evidence of
+        saturation and never counts.
         """
         if not self.trustworthy:
             return False
@@ -266,9 +336,15 @@ class SaturationTest:
         return {
             "mu_ex_membrane": round(self.membrane.mu_ex, 4),
             "mu_ex_bulk": round(self.bulk.mu_ex, 4),
+            "excess_difference_kcal_mol": round(self.excess_difference, 4),
+            "density_term_kcal_mol": round(self.density_term, 4),
+            "density_term_included": self.density_term_included,
+            "rho_w_membrane_per_A3": self.rho_membrane,
+            "rho_w_bulk_per_A3": self.rho_bulk,
             "difference_kcal_mol": round(self.difference, 4),
             "combined_stderr": round(self.combined_stderr, 4),
             "threshold_kcal_mol": round(self.tolerance_sigma * self.combined_stderr, 4),
+            "crossed": self.crossed,
             "saturated": self.saturated,
             "trustworthy": self.trustworthy,
         }
@@ -278,6 +354,7 @@ __all__ = [
     "WidomEstimate",
     "WidomError",
     "SaturationTest",
+    "water_number_density",
     "estimate_from_series",
     "read_widom_file",
     "mu_ex_from_boltzmann",

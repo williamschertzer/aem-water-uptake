@@ -78,7 +78,8 @@ def test_loading_loop_never_calls_insertion_blockage_converged(tmp_path, monkeyp
         "saturated": crossing, "trustworthy": True,
     })
     bulk = SimpleNamespace(mu_ex=SimpleNamespace(mu_ex=-6.5, stderr=.05, converged=True),
-                           sanity=lambda: [], method="fep", settings=None)
+                           sanity=lambda: [], method="fep", settings=None,
+                           water_number_density=0.0334)
     outcome = driver.run_uptake(cfg, tmp_path, [object()], bulk_reference=bulk)
     assert outcome.stop_reason == expected_reason
     assert outcome.converged is crossing

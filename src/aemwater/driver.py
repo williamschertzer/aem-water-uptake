@@ -76,7 +76,15 @@ from pathlib import Path
 import numpy as np
 
 from .utils import LOG, read_json_or_none, write_json
-from .widom import SaturationTest, WidomEstimate, read_widom_file
+from .saturation import estimate_saturation_point
+from .widom import (KB_KCAL, SaturationTest, WidomEstimate, read_widom_file,
+                    water_number_density)
+
+#: Definition of ``mu_gap`` written into uptake_state.json. Checkpoints
+#: without it hold the excess-only gap mu_ex,m - mu_ex,b and old stop flags
+#: from the ``>= -k sigma`` rule; they are migrated on resume (see
+#: :func:`_migrate_gap_definition`) rather than silently mixed.
+GAP_DEFINITION = "total_mu_v1"
 
 
 def bulk_n_waters(widom_spec) -> int:
@@ -130,12 +138,25 @@ class Iteration:
     water_uptake_pct: float      # 100 * m_water / m_dry
     mu_ex: float | None = None
     mu_ex_stderr: float | None = None
-    mu_gap: float | None = None  # membrane - bulk
+    #: Total mu_w gap, membrane - bulk: excess part + kT ln(rho_m/rho_b).
+    mu_gap: float | None = None
+    #: The stop flag: sampling adequate and total gap >= 0 (SaturationTest.crossed).
     saturated: bool = False
     geometrically_saturated: bool = False
     sampling_adequate: bool = False
     free_volume_fraction: float = 0.0
     wall_seconds: float = 0.0
+    #: mu_ex,m - mu_ex,b (the pre-``total_mu_v1`` stop quantity), kcal/mol.
+    mu_gap_excess: float | None = None
+    #: kT ln(rho_w,m / rho_w,b), kcal/mol; mu_gap = mu_gap_excess + density_term.
+    density_term: float | None = None
+    #: (N + 1) / V of the cell mu_ex was sampled in, molecules / A^3.
+    rho_water: float | None = None
+    #: Volume (A^3) of the cell mu_ex was sampled in: the NVT FEP cell, or the
+    #: NPT mean for Widom. ``volume`` above stays the NPT mean.
+    mu_volume: float | None = None
+    #: Gap within tolerance*sigma of zero -- reported, not a stop condition.
+    gap_within_noise: bool = False
 
     def to_row(self) -> dict[str, object]:
         return asdict(self)
@@ -160,6 +181,14 @@ class UptakeResult:
     #: the gate. A result built on an unconverged dry cell is a lower bound at
     #: best, and that has to be visible in the saved state, not only in a log.
     dry_convergence: dict[str, object] | None = None
+    #: Interpolated zero of the total mu gap (aemwater.saturation), or None
+    #: when no trustworthy crossing was recorded.
+    saturation_point: object | None = None
+    #: Bulk water number density (N_b + 1) / V_b used in the density term.
+    bulk_rho_water: float | None = None
+    #: lambda and wt% at ``saturation_point.n_waters`` (None without a crossing).
+    saturation_lambda: float | None = None
+    saturation_uptake_pct: float | None = None
 
     @property
     def has_ionic_groups(self) -> bool:
@@ -193,6 +222,22 @@ class UptakeResult:
             "hydrated_density_g_cm3": round(self.hydrated_density, 4),
             "dry_density_g_cm3": round(self.dry_density, 4),
             "bulk_mu_ex_kcal_mol": round(self.bulk_mu_ex, 3),
+            "bulk_rho_water_per_A3": self.bulk_rho_water,
+            "gap_definition": GAP_DEFINITION,
+            # The equilibrium estimate: the interpolated zero of the total
+            # gap. n_waters / lambda / wt% above are the *final loaded*
+            # state, which includes any post-saturation overshoot.
+            "saturation_point": (self.saturation_point.summary()
+                                 if self.saturation_point is not None else None),
+            "saturation_lambda": (
+                round(self.saturation_lambda, 3)
+                if self.saturation_lambda is not None
+                and math.isfinite(self.saturation_lambda) else None
+            ),
+            "saturation_uptake_wt_pct": (
+                round(self.saturation_uptake_pct, 2)
+                if self.saturation_uptake_pct is not None else None
+            ),
             "stop_reason": self.stop_reason,
             "converged": self.converged,
             "convergence_scope": "single_trajectory_crossing",
@@ -224,8 +269,9 @@ def next_batch_size(
     shrinks as the chemical-potential gap closes so the endpoint is approached
     rather than overshot.
 
-    ``mu_gap`` is mu_ex(membrane) - mu_ex(bulk); negative means water is still
-    driven in. The first iteration has no measurement yet and gets a batch sized
+    ``mu_gap`` is the total water chemical-potential gap, membrane - bulk
+    (excess part plus kT ln(rho_m/rho_b), see :class:`SaturationTest`);
+    negative means water is still driven in. The first iteration has no measurement yet and gets a batch sized
     from ``n_reference_sites``, since roughly one water per site is a safe first
     step.
 
@@ -407,6 +453,51 @@ def _resume_data_file(
     return relaxed
 
 
+def _migrate_gap_definition(iterations, workdir: Path, bulk_reference,
+                            config) -> list[Iteration]:
+    """Recompute stored gaps and stop flags of a pre-``total_mu_v1`` checkpoint.
+
+    Older checkpoints stored the excess-only gap and a ``>= -k sigma`` stop
+    flag. Every input of the total gap is on disk -- mu_ex, the sampling
+    verdict (which never depended on the gap), the water count and the cell --
+    so the migration is exact rather than a restart: for FEP the cell is the
+    iteration's ``relaxed.data`` box, which is the box its NVT windows ran in.
+    Only if that file is gone does it fall back to the NPT-mean volume, and it
+    says so.
+    """
+    rho_bulk = _bulk_water_density(bulk_reference)
+    bulk_mu = float(bulk_reference.mu_ex.mu_ex)
+    temperature = float(config.md.temperature)
+    migrated = []
+    for it in iterations:
+        if it.mu_ex is None or not math.isfinite(it.mu_ex):
+            migrated.append(it)
+            continue
+        mu_volume = float(it.volume)
+        if config.mu_ex_method == "fep":
+            relaxed = workdir / f"iter_{it.index:03d}" / "relaxed.data"
+            if relaxed.exists():
+                mu_volume = float(_read_final_state(relaxed)[2]) ** 3
+            else:
+                LOG.warning("migrating iteration %d: %s missing, using the "
+                            "NPT-mean volume for the density term",
+                            it.index, relaxed)
+        rho = water_number_density(int(it.n_waters_after), mu_volume)
+        excess = float(it.mu_ex) - bulk_mu
+        density_term = KB_KCAL * temperature * math.log(rho / rho_bulk)
+        gap = excess + density_term
+        combined = math.hypot(it.mu_ex_stderr or 0.0,
+                              float(bulk_reference.mu_ex.stderr or 0.0))
+        adequate = bool(it.sampling_adequate)
+        migrated.append(replace(
+            it, mu_gap=gap, mu_gap_excess=excess, density_term=density_term,
+            rho_water=rho, mu_volume=mu_volume,
+            saturated=adequate and gap >= 0.0,
+            gap_within_noise=adequate and gap >= -config.widom.sigma_tolerance * combined,
+        ))
+    return migrated
+
+
 def _write_state(path: Path, payload: dict) -> None:
     """Checkpoint the loop so an interrupted run resumes instead of restarting.
 
@@ -418,8 +509,15 @@ def _write_state(path: Path, payload: dict) -> None:
     write_json(path, payload)
 
 
-def _uptake_saturation_test(membrane_estimate, bulk, config):
-    """Judge a local crossing without claiming between-cell convergence."""
+def _uptake_saturation_test(membrane_estimate, bulk, config, *,
+                            rho_membrane=None, rho_bulk=None):
+    """Judge a local crossing without claiming between-cell convergence.
+
+    ``rho_membrane`` / ``rho_bulk`` are the (N + 1) / V water number densities
+    of the two cells the mu_ex values were sampled in. The driver always passes
+    both so ``difference`` is the total mu_w gap; they are optional only so the
+    local-precision gates can be tested in isolation.
+    """
     from .fep.campaign import FEPEstimate
 
     local_ok = None
@@ -440,8 +538,36 @@ def _uptake_saturation_test(membrane_estimate, bulk, config):
                 ) and bool(counts) and min(counts) >= config.fep.min_effective_samples
     return SaturationTest(
         membrane_estimate, bulk, tolerance_sigma=config.widom.sigma_tolerance,
-        membrane_converged=local_ok,
+        membrane_converged=local_ok, rho_membrane=rho_membrane,
+        rho_bulk=rho_bulk, temperature=config.md.temperature,
     )
+
+
+def _saturation_fields(test: SaturationTest, rho_membrane: float,
+                       mu_volume: float) -> dict[str, object]:
+    """The per-iteration saturation record shared by every code path."""
+    return {
+        "mu_gap": test.difference,
+        "mu_gap_excess": test.excess_difference,
+        "density_term": test.density_term,
+        "rho_water": rho_membrane,
+        "mu_volume": mu_volume,
+        "saturated": test.crossed,
+        "gap_within_noise": test.saturated,
+        "trustworthy": test.trustworthy,
+    }
+
+
+def _bulk_water_density(bulk_reference) -> float:
+    """(N_b + 1) / V_b of the bulk cell, refusing a reference without a volume."""
+    try:
+        return float(bulk_reference.water_number_density)
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise DriverError(
+            "the bulk reference carries no usable cell volume, so the water "
+            "density term of the chemical-potential gap cannot be formed; "
+            f"recompute the reference ({exc})"
+        ) from exc
 
 
 def _membrane_mu_ex_fep(config, stage: Path, contents, coords, edge, step: int):
@@ -593,13 +719,19 @@ def _run_iteration(
     else:
         est = read_widom_file(stage / "mu.dat", md.temperature,
                               n_blocks=config.widom.n_blocks)
-    test = _uptake_saturation_test(est, bulk_reference.mu_ex, config)
+    # The density term uses the cell mu_ex was sampled in. FEP windows run
+    # NVT in the relaxed box handed to _membrane_mu_ex_fep, so its volume is
+    # exact; Widom samples during NPT, so its natural volume is the NPT mean.
+    mu_volume = float(new_edge) ** 3 if config.mu_ex_method == "fep" else volume
+    rho_membrane = water_number_density(n_waters, mu_volume)
+    test = _uptake_saturation_test(
+        est, bulk_reference.mu_ex, config, rho_membrane=rho_membrane,
+        rho_bulk=_bulk_water_density(bulk_reference))
     return {
         "coords": new_coords, "elements": new_elements, "edge": new_edge,
         "density": density, "volume": volume, "mu_ex": est.mu_ex,
         "stderr": est.stderr if np.isfinite(est.stderr) else 0.0,
-        "mu_gap": test.difference, "saturated": test.saturated,
-        "trustworthy": test.trustworthy,
+        **_saturation_fields(test, rho_membrane, mu_volume),
     }
 
 
@@ -836,6 +968,17 @@ def run_uptake(
         n_waters = saved.get("n_waters", 0)
         mu_gap = saved.get("mu_gap")
         stderr = saved.get("stderr", 0.0)
+        if saved.get("gap_definition") != GAP_DEFINITION and iterations:
+            LOG.warning(
+                "uptake checkpoint predates the total-mu saturation criterion "
+                "(%s); recomputing %d stored gaps with the water density term "
+                "and re-judging the stop condition",
+                saved.get("gap_definition", "excess-only"), len(iterations))
+            iterations = _migrate_gap_definition(
+                iterations, workdir, bulk_reference, config)
+            measured = [it for it in iterations if it.mu_gap is not None]
+            if measured:
+                mu_gap = measured[-1].mu_gap
         if iterations and n_waters != iterations[-1].n_waters_after:
             raise DriverError(
                 f"uptake checkpoint records {n_waters} waters globally but "
@@ -870,17 +1013,27 @@ def run_uptake(
             waters=[],
         )
         est = _membrane_mu_ex_fep(config, stage, contents, coords, edge, 0)
-        test = _uptake_saturation_test(est, bulk_reference.mu_ex, config)
-        mu_gap = test.difference
+        # N = 0: the ghost is the only water, so rho = 1/V. Finite, which is
+        # why the (N + 1)/V convention matters most exactly here.
+        rho_membrane = water_number_density(0, float(edge) ** 3)
+        test = _uptake_saturation_test(
+            est, bulk_reference.mu_ex, config, rho_membrane=rho_membrane,
+            rho_bulk=_bulk_water_density(bulk_reference))
+        fields = _saturation_fields(test, rho_membrane, float(edge) ** 3)
+        mu_gap = fields["mu_gap"]
         stderr = est.stderr if np.isfinite(est.stderr) else 0.0
         iterations.append(Iteration(
             index=0, n_waters_before=0, n_requested=0, n_inserted=0,
             n_waters_after=0, density=dry_density, volume=edge ** 3,
             lambda_value=hydration_number(0, n_ionic), water_uptake_pct=0.0,
             mu_ex=est.mu_ex, mu_ex_stderr=stderr, mu_gap=mu_gap,
-            saturated=test.saturated, geometrically_saturated=False,
-            sampling_adequate=test.trustworthy,
+            saturated=fields["saturated"], geometrically_saturated=False,
+            sampling_adequate=fields["trustworthy"],
             free_volume_fraction=0.0, wall_seconds=time.time() - t0,
+            mu_gap_excess=fields["mu_gap_excess"],
+            density_term=fields["density_term"], rho_water=rho_membrane,
+            mu_volume=fields["mu_volume"],
+            gap_within_noise=fields["gap_within_noise"],
         ))
         baseline_measured = True
         start_step = 1
@@ -888,6 +1041,7 @@ def run_uptake(
             "iterations": [i.to_row() for i in iterations],
             "n_waters": 0, "mu_gap": mu_gap, "stderr": stderr,
             "failed_batches": 0, "next_step": start_step,
+            "gap_definition": GAP_DEFINITION,
             "baseline_measured": True,
         })
         LOG.info("iteration 0: dry baseline, uptake = 0.0%%, mu_ex = %.3f "
@@ -929,6 +1083,7 @@ def run_uptake(
                 "iterations": [i.to_row() for i in iterations],
                 "n_waters": n_waters, "mu_gap": mu_gap, "stderr": stderr,
                 "failed_batches": failed_batches, "next_step": step + 1,
+                "gap_definition": GAP_DEFINITION,
                 "baseline_measured": baseline_measured,
             })
             if failed_batches >= config.insertion.max_failed_batches:
@@ -972,12 +1127,18 @@ def run_uptake(
             geometrically_saturated=False,
             free_volume_fraction=result.void_map.free_volume_fraction,
             wall_seconds=time.time() - t0,
+            mu_gap_excess=state.get("mu_gap_excess"),
+            density_term=state.get("density_term"),
+            rho_water=state.get("rho_water"),
+            mu_volume=state.get("mu_volume"),
+            gap_within_noise=state.get("gap_within_noise", False),
         )
         iterations.append(it)
         _write_state(state_file, {
             "iterations": [i.to_row() for i in iterations],
             "n_waters": n_waters, "mu_gap": mu_gap, "stderr": stderr,
             "failed_batches": failed_batches, "next_step": step + 1,
+            "gap_definition": GAP_DEFINITION,
             "baseline_measured": baseline_measured,
         })
         LOG.info(
@@ -999,6 +1160,13 @@ def run_uptake(
             )
 
     final = iterations[-1] if iterations else None
+    point = estimate_saturation_point(
+        iterations, bulk_stderr=float(bulk_reference.mu_ex.stderr or 0.0))
+    if point is not None:
+        LOG.info(
+            "total mu gap crosses zero at %.1f waters (95%% CI %.1f-%.1f, %s "
+            "over %d points)", point.n_waters, point.n_waters_low,
+            point.n_waters_high, point.method, point.n_points)
     return UptakeResult(
         iterations=iterations,
         n_waters=n_waters,
@@ -1015,6 +1183,12 @@ def run_uptake(
         workdir=workdir,
         composition=comp.summary() if hasattr(comp, "summary") else {},
         dry_convergence=dry_convergence,
+        saturation_point=point,
+        bulk_rho_water=_bulk_water_density(bulk_reference),
+        saturation_lambda=(None if point is None
+                           else hydration_number(point.n_waters, n_ionic)),
+        saturation_uptake_pct=(None if point is None
+                               else water_uptake_percent(point.n_waters, dry_mass)),
     )
 
 

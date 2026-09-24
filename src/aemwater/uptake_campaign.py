@@ -314,11 +314,18 @@ def run_uptake_campaign(
             )
             uptake.to_dataframe().to_csv(mdir / "uptake_trajectory.csv", index=False)
             (mdir / "result.json").write_text(json.dumps(uptake.summary(), indent=2))
+            # Average the interpolated zero of the total mu gap, not the
+            # final loaded state: with post_saturation_iterations > 0 the
+            # last state is deliberately past the endpoint.
+            endpoint = getattr(uptake, "saturation_point", None)
             return MorphologyUptake(
                 index=index, seed=seed, workdir=mdir,
-                n_waters=uptake.n_waters,
-                lambda_value=uptake.lambda_value,
-                water_uptake_pct=uptake.water_uptake_pct,
+                n_waters=(uptake.n_waters if endpoint is None
+                          else int(round(endpoint.n_waters))),
+                lambda_value=(uptake.lambda_value if endpoint is None
+                              else uptake.saturation_lambda),
+                water_uptake_pct=(uptake.water_uptake_pct if endpoint is None
+                                  else uptake.saturation_uptake_pct),
                 hydrated_density=uptake.hydrated_density,
                 stop_reason=uptake.stop_reason,
                 converged=uptake.converged,
